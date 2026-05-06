@@ -131,7 +131,9 @@ main{
 }
 .scroll-inner{
   width:100%;max-width:900px;
-  padding:50vh 8% 60vh 8%;
+  /* 上下都 50vh：保證第一個字跟最後一個字都能準確置中於指示線 */
+  /* 下邊距用 60vh + 額外 buffer 容納 header wrap 變高的情況 */
+  padding:50vh 8% 70vh 8%;
   color:#f3ede4;
   font-weight:500;
   white-space:pre-wrap;
@@ -890,9 +892,13 @@ function startVoice(opts){
       updateHighlight(prevIdx);
       els.recogStrip.innerHTML = '正在唸：<b>' + escapeHtml(recent) + '</b>';
       if(state.charIdx >= state.charSpans.length){
+        // 念到稿尾：直接 hard set 位置到 target，不要靠緩動（不然 600ms 內走不完最後一段）
+        state.targetPosition = targetForCharIdx(state.charIdx);
+        state.position = state.targetPosition;
+        applyScroll();
         celebrateCompletion();
         toast('稿件結束 ✓');
-        setTimeout(stopVoice, 600);
+        setTimeout(stopVoice, 1200);   // 拉長到 1.2 秒，留時間看到完成動畫
       }
     }
   };
