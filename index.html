@@ -366,7 +366,7 @@ main{
       <span id="charCount">0 字</span>
       <span>稿件</span>
     </div>
-    <textarea id="script" placeholder="把講稿貼進來，或點上方「匯入」載入 .txt"></textarea>
+    <textarea id="script" placeholder="把講稿貼進來。準備好就按右上「跟讀」開始念，畫面會自動跟著你的語速捲動。"></textarea>
   </section>
   <section class="stage" id="stage">
     <div class="scroll" id="scroll">
@@ -414,7 +414,11 @@ const els = {
 };
 
 const state = {
-  mode:'idle',          // 'idle' | 'auto' | 'voice'
+  // 顯式狀態機（中間狀態納入建模）
+  mode:'idle',          // 'idle' | 'counting' | 'auto' | 'startingMic' | 'voice'
+  counting:false,       // 倒數中（與 mode='counting' 同步，但 setTimeout 內讀 state.counting 比較簡潔）
+  starting:false,       // ensureMicStream 進行中（防止重入 startVoice）
+  // 設定
   speed:30,
   fontSize:64,
   lineHeight:160,
@@ -423,36 +427,122 @@ const state = {
   mirrorH:false, mirrorV:false,
   lang:'zh-TW',
   // scroll
-  position:0,           // current scroll px
-  targetPosition:0,     // smoothed target (voice mode)
+  position:0,
+  targetPosition:0,
   lastT:0, raf:null,
-  // script tracking
-  charSpans:[],         // array of HTMLElement, only "real" chars
-  charNorms:[],         // normalized char array
-  charIdx:0,            // next char to read
+  // script
+  charSpans:[],
+  charNorms:[],
+  charIdx:0,
   // speech
   recognition:null,
-  recognitionToken:0,           // 每次新建 SR 物件 +1，回呼用來確認自己還是當前那個
-  recognitionBaseFinal:'',      // 累積已處理的 final 文字（會滾動截尾）
-  recognitionLastFinalIndex:0,  // watermark：避免同一筆 final 被加兩次
-  recognitionLastEndAt:0,       // onend timestamp，限制自動重啟頻率
-  recognitionRestartCount:0,    // 短時間連續重啟次數
-  manualScrollLock:0,           // 手動拖曳/滾輪後鎖定 voice 對齊的 timestamp
-  lastAdvanceAt:0,              // 上次 charIdx 推進的時間
-  stuckWarned:false,            // 卡住提示是否已顯示（避免重複跳）
-  micStream:null,               // 持有的 getUserMedia stream，避免 Safari 每次 SR 重啟都彈權限
+  recognitionToken:0,
+  recognitionBaseFinal:'',
+  recognitionLastFinalIndex:0,
+  recognitionLastEndAt:0,
+  recognitionRestartCount:0,
+  micStream:null,
+  // sensors
+  manualScrollLock:0,
+  lastAdvanceAt:0,
+  stuckWarned:false,
+  // 集中式 timer refs（避免散落、方便 dispose）
+  timers: {
+    save: null,
+    render: null,
+    countdown: null,
+    completion: null,
+    completionStop: null,
+    langSwitch: null,
+    resetRestart: null,
+    onendRestart: null,
+    toast: null,
+  },
+  _quotaWarned: false,
 };
+
+// 統一清掉所有跨流程 timer（mode 切換或 dispose 時用）
+function clearAllTimers(){
+  for(const k in state.timers){
+    if(state.timers[k]){ clearTimeout(state.timers[k]); state.timers[k] = null; }
+  }
+}
+function clearTimerRef(name){
+  if(state.timers[name]){ clearTimeout(state.timers[name]); state.timers[name] = null; }
+}
 
 const STORAGE = 'teleprompter:v2';
 const PUNCT = /[\s\r\n，。！？、；：「」『』（）()【】[\]—…·.,!?;:'"`~@#$%^&*\-_=+/\\<>]/;
 
+// 字元等價映射：把易混字 collapse 成代表字，提升辨識/腳本對齊容錯
+// 涵蓋：① 中文同音字（它/他/在/再/做/作/的/得/地…）② 簡繁高頻字 ③ 數字阿拉伯↔中文
+const NORMALIZE_MAP = (() => {
+  const m = Object.create(null);
+  // ── 同音 / 多形 ──（念出來容易混淆，全部 collapse 到代表字）
+  const groups = [
+    ['他','它','她','牠'],
+    ['在','再'],
+    ['做','作'],
+    ['的','得','地'],
+    ['你','妳'],
+    ['是','事'],
+    ['以','已','已'],
+    ['那','哪'],
+    ['因','應'],
+    ['才','纔'],
+    ['麼','嘛'],
+    ['只','祇','衹'],
+  ];
+  for(const g of groups){
+    const rep = g[0];
+    for(const c of g) m[c] = rep;
+  }
+  // ── 簡繁高頻字（簡 → 繁，~150 組常用） ──
+  const simp2trad = {
+    '对':'對','会':'會','过':'過','这':'這','么':'麼','为':'為','发':'發','说':'說',
+    '们':'們','后':'後','里':'裡','体':'體','学':'學','应':'應','时':'時','间':'間',
+    '问':'問','题':'題','样':'樣','长':'長','门':'門','开':'開','关':'關','现':'現',
+    '场':'場','车':'車','马':'馬','鸟':'鳥','鱼':'魚','龙':'龍','飞':'飛','风':'風',
+    '专':'專','业':'業','团':'團','国':'國','圆':'圓','声':'聲','听':'聽','觉':'覺',
+    '认':'認','识':'識','证':'證','话':'話','语':'語','请':'請','谢':'謝','让':'讓',
+    '没':'沒','应':'應','给':'給','带':'帶','头':'頭','脸':'臉','体':'體','乐':'樂',
+    '钟':'鐘','钱':'錢','银':'銀','贝':'貝','买':'買','卖':'賣','贵':'貴','货':'貨',
+    '产':'產','质':'質','报':'報','纸':'紙','书':'書','笔':'筆','画':'畫','图':'圖',
+    '号':'號','级':'級','约':'約','结':'結','队':'隊','员':'員','单':'單','简':'簡',
+    '议':'議','计':'計','划':'劃','节':'節','创':'創','机':'機','视':'視','听':'聽',
+    '电':'電','网':'網','线':'線','络':'絡','统':'統','系':'系','软':'軟','硬':'硬',
+    '务':'務','须':'須','虑':'慮','虚':'虛','实':'實','际':'際','观':'觀','点':'點',
+    '难':'難','易':'易','众':'眾','众':'眾','丑':'醜','变':'變','华':'華','协':'協',
+    '区':'區','卫':'衛','厅':'廳','双':'雙','发':'發','吕':'呂','听':'聽','营':'營',
+    '县':'縣','础':'礎','环':'環','积':'積','称':'稱','复':'復','内':'內','岁':'歲',
+    '个':'個','么':'麼','么':'麼','与':'與','汉':'漢','两':'兩','严':'嚴','丧':'喪',
+    '样':'樣','医':'醫','艺':'藝','应':'應','广':'廣','录':'錄','导':'導','执':'執',
+    '挂':'掛','据':'據','摆':'擺','击':'擊','拥':'擁','蕴':'蘊','尘':'塵','岛':'島',
+    '层':'層','属':'屬','幅':'幅','弹':'彈','征':'徵','彻':'徹','径':'徑','悦':'悅',
+    '惊':'驚','愈':'癒','才':'纔','扑':'撲','抢':'搶','拟':'擬','挽':'輓','拣':'揀',
+    '挤':'擠','损':'損','摆':'擺','抚':'撫','搜':'搜','凭':'憑','虽':'雖','蝇':'蠅',
+    '坏':'壞','块':'塊','块':'塊','块':'塊','坚':'堅','坛':'壇','垄':'壟','垫':'墊',
+    '执':'執','场':'場','尝':'嘗','尧':'堯','尽':'盡','岂':'豈','峡':'峽','岭':'嶺',
+    '币':'幣','废':'廢','开':'開','弯':'彎','张':'張','强':'強','归':'歸','怀':'懷',
+  };
+  for(const k in simp2trad) m[k] = simp2trad[k];
+  // ── 數字：阿拉伯 ↔ 中文（雙向 collapse 成阿拉伯） ──
+  const cnDigits = {'零':'0','〇':'0','一':'1','二':'2','兩':'2','两':'2','三':'3','四':'4','五':'5','六':'6','七':'7','八':'8','九':'9'};
+  for(const k in cnDigits) m[k] = cnDigits[k];
+  // ── 全形數字 → 半形 ──
+  for(let i = 0; i < 10; i++) m[String.fromCharCode(0xFF10 + i)] = String(i);
+  // ── 全形英文字母 → 半形 ──
+  for(let i = 0; i < 26; i++){
+    m[String.fromCharCode(0xFF21 + i)] = String.fromCharCode(0x41 + i).toLowerCase();
+    m[String.fromCharCode(0xFF41 + i)] = String.fromCharCode(0x41 + i).toLowerCase();
+  }
+  return m;
+})();
+
 // ============ Storage ============
-let _saveTimer = null;
-let _quotaWarned = false;
 function save(){
-  // debounce 避免 textarea 每打一個字都 stringify 寫 localStorage
-  clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(() => {
+  clearTimerRef('save');
+  state.timers.save = setTimeout(() => {
     try{
       localStorage.setItem(STORAGE, JSON.stringify({
         text: els.script.value,
@@ -463,13 +553,12 @@ function save(){
       }));
     }catch(e){
       console.warn('[teleprompter] save failed', e);
-      if(!_quotaWarned && (e.name === 'QuotaExceededError' || /quota/i.test(e.message||''))){
-        _quotaWarned = true;
+      if(!state._quotaWarned && (e.name === 'QuotaExceededError' || /quota/i.test(e.message||''))){
+        state._quotaWarned = true;
         toast('稿件過大，無法自動保存（localStorage 已滿）', 3000);
       }
     }
   }, 300);
-  // 清掉舊版 key（v1）的殘留
   try{ localStorage.removeItem('teleprompter:v1'); }catch(e){}
 }
 function load(){
@@ -562,7 +651,8 @@ function normChar(c){
   if(!c) return '';
   c = c.toLowerCase();
   if(PUNCT.test(c)) return '';
-  return c;
+  // 套等價映射：同音字、簡繁、數字、全形 → 代表字
+  return NORMALIZE_MAP[c] || c;
 }
 
 function renderText(){
@@ -684,16 +774,30 @@ function ensureLoop(){
   if(!state.raf) state.raf = requestAnimationFrame(tick);
 }
 
+// 統一清掉 SR 物件 + 相關 state + 排隊中的 SR timer
+function disposeRecognition(){
+  if(state.recognition){
+    const oldRec = state.recognition;
+    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.onstart = null; oldRec.abort(); }catch(e){}
+    state.recognition = null;
+  }
+  state.recognitionToken++;
+  state.recognitionBaseFinal = '';
+  state.recognitionLastFinalIndex = 0;
+  state.recognitionLastEndAt = 0;
+  state.recognitionRestartCount = 0;
+  clearTimerRef('onendRestart');
+  clearTimerRef('resetRestart');
+  clearTimerRef('langSwitch');
+}
+
 function setMode(m){
   state.mode = m;
   state.lastT = 0;
-  // 切到 idle/auto 時，若還有舊 SR 必須完整清理（不只是 stop，還要清回呼避免續啟）
+  // 切走 voice：完整清掉 SR + 釋放麥克風
   if(m !== 'voice' && state.recognition){
-    const oldRec = state.recognition;
-    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
-    state.recognition = null;
-    state.recognitionToken++;
-    releaseMicStream();   // 切走 voice 模式 = 釋放麥克風（紅燈熄）
+    disposeRecognition();
+    releaseMicStream();
   }
   if(m === 'idle'){
     els.playBtn.textContent = '▶ 自動';
@@ -721,7 +825,6 @@ function setMode(m){
     els.modeLabel.textContent = '語音跟讀';
     els.micBtn.classList.add('on');
     els.micBtn.textContent = '⏹ 停止';
-    // 視線指示線開始呼吸 + 浮動麥克風指示器（全螢幕也能看到）
     els.indicator.classList.add('listening');
     els.stageMicPill.classList.add('show');
     ensureLoop();
@@ -749,25 +852,20 @@ function findCharIdxNearViewportCenter(){
 
 function reset(opts){
   opts = opts || {};
-  // 預設：voice 模式軟重置（對齊目前位置）／ idle 或 auto 模式硬重置（回開頭）
-  // opts.toStart=true 強制硬重置
   const hardReset = opts.toStart || state.mode !== 'voice';
 
   if(state.mode === 'auto') setMode('idle');
+  if(state.counting) cancelCountdown();
 
   if(hardReset){
     state.position = 0;
     state.targetPosition = 0;
     state.charIdx = 0;
   }else{
-    // 軟重置：scroll 位置不動，charIdx 拉到畫面中央那個字
     state.charIdx = findCharIdxNearViewportCenter();
     state.targetPosition = state.position;
   }
 
-  // 共同清理（辨識歷史、卡住提示、完成動畫）
-  state.recognitionBaseFinal = '';
-  state.recognitionLastFinalIndex = 0;
   state.manualScrollLock = 0;
   state.lastAdvanceAt = 0;
   state.stuckWarned = false;
@@ -776,56 +874,48 @@ function reset(opts){
   fullPaintHighlight();
   applyScroll();
 
-  // 語音模式：abort + 重啟 SR（清掉瀏覽器內部累積的舊 ev.results）
-  if(state.mode === 'voice' && state.recognition){
-    const oldRec = state.recognition;
-    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
-    state.recognition = null;
-    setTimeout(() => {
-      if(state.mode === 'voice') startVoice({silent:true});
+  // voice 模式：完整 dispose + 80ms 後重建（清瀏覽器內部 ev.results）
+  // 用 token snapshot guard 防使用者連按 R 雙啟動 SR
+  if(state.mode === 'voice'){
+    disposeRecognition();
+    const myGen = state.recognitionToken;
+    clearTimerRef('resetRestart');
+    state.timers.resetRestart = setTimeout(() => {
+      if(state.mode === 'voice' && state.recognitionToken === myGen) startVoice({silent:true});
     }, 80);
     toast(hardReset ? '已回到開頭' : '已重新對齊到目前位置，繼續念', 1400);
   }
 }
 
 // ============ Auto play ============
-let _countdownTimer = null;
-let _counting = false;
 function toggleAuto(){
-  // 倒數中再按一次：直接取消，不要疊兩個 setMode
-  if(_counting){
-    cancelCountdown();
-    return;
-  }
+  if(state.counting){ cancelCountdown(); return; }
   if(state.mode === 'auto') return setMode('idle');
-  // 自動播放跟語音跟讀互斥
   if(state.mode === 'voice') stopVoice();
   countdown(3, () => setMode('auto'));
 }
 function cancelCountdown(){
-  _counting = false;
-  clearTimeout(_countdownTimer);
+  state.counting = false;
+  clearTimerRef('countdown');
   els.countdown.classList.remove('show');
   els.cdNum.textContent = '';
   els.cdCap.textContent = '';
 }
 
 // ============ Completion ritual ============
-let _completionTimer = null;
 function celebrateCompletion(){
-  // 進度條金光掃過
   els.progressBar.classList.add('done');
-  // 中央 ✓ 圖示彈出
   els.completionMark.classList.add('show');
-  clearTimeout(_completionTimer);
-  _completionTimer = setTimeout(() => {
+  clearTimerRef('completion');
+  state.timers.completion = setTimeout(() => {
     els.completionMark.classList.remove('show');
   }, 1800);
 }
 function resetCompletion(){
   els.progressBar.classList.remove('done');
   els.completionMark.classList.remove('show');
-  clearTimeout(_completionTimer);
+  clearTimerRef('completion');
+  clearTimerRef('completionStop');
 }
 
 // ============ Voice follow ============
@@ -833,44 +923,63 @@ function speechSupported(){
   return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
 
-// 預先取得麥克風 stream 並持有著——讓後續 SR 重啟（onend 自動續啟、語言切換）
-// 全部 piggy-back 在同一個權限 grant 上，避免 Safari 每次都重彈授權
+// 預先取得麥克風 stream 並持有——後續 SR 重啟全部 piggy-back 在同一個權限 grant 上
 async function ensureMicStream(){
   if(state.micStream && state.micStream.active && state.micStream.getAudioTracks().some(t => t.readyState === 'live')){
     return true;
   }
-  if(!navigator.mediaDevices?.getUserMedia){
-    return true;  // 老瀏覽器沒 API 也別擋，讓 SR 自己試
-  }
+  if(!navigator.mediaDevices?.getUserMedia) return true;
   try{
     state.micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    // macOS Sequoia 系統權限剛 grant 後第一個 stream 有時是空的，等 audio track 真的 live
+    await new Promise(r => setTimeout(r, 80));
+    const tracks = state.micStream.getAudioTracks();
+    if(!tracks.length || tracks[0].readyState !== 'live'){
+      try{ state.micStream.getTracks().forEach(t => t.stop()); }catch(e){}
+      state.micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    }
+    // 監聽 track 被 OS 搶走（Discord 開麥之類）
+    state.micStream.getAudioTracks().forEach(t => {
+      t.onended = () => {
+        if(state.mode === 'voice'){
+          toast('麥克風被其他應用搶走，跟讀已停止', 3000);
+          stopVoice();
+        }
+      };
+    });
     return true;
   }catch(e){
     if(e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError'){
-      toast('麥克風權限被拒絕');
+      const isMac = /Mac/i.test(navigator.platform);
+      toast(isMac
+        ? '麥克風被拒。請至「系統設定 → 隱私 → 麥克風」開啟瀏覽器'
+        : '麥克風被拒。點網址列鎖頭 → 網站設定 → 麥克風 → 允許', 5000);
     }else if(e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError'){
-      toast('找不到麥克風裝置');
+      toast('找不到麥克風裝置', 3000);
+    }else if(e.name === 'NotReadableError'){
+      toast('麥克風被其他應用佔用，請先關 Discord/Zoom 等', 4000);
     }else{
-      toast('無法取得麥克風：' + (e.message || e.name));
+      toast('無法取得麥克風：' + (e.message || e.name), 3500);
     }
     return false;
   }
 }
 function releaseMicStream(){
   if(state.micStream){
-    try{ state.micStream.getTracks().forEach(t => t.stop()); }catch(e){}
+    try{ state.micStream.getTracks().forEach(t => { t.onended = null; t.stop(); }); }catch(e){}
     state.micStream = null;
   }
 }
 function toast(msg, ms=2200){
   els.toast.textContent = msg;
   els.toast.classList.add('show');
-  clearTimeout(toast._t);
-  toast._t = setTimeout(()=> els.toast.classList.remove('show'), ms);
+  clearTimerRef('toast');
+  state.timers.toast = setTimeout(()=> els.toast.classList.remove('show'), ms);
 }
 
 async function startVoice(opts){
   opts = opts || {};
+  if(state.starting) return;  // 防止 ensureMicStream await 期間被重入呼叫
   if(!speechSupported()){
     toast('此瀏覽器不支援語音識別，請改用 Chrome / Edge');
     return;
@@ -879,15 +988,24 @@ async function startVoice(opts){
     toast('請先在左側輸入講稿');
     return;
   }
-  // file:// 開啟時麥克風授權無法持久，第一次提示使用者
+  if(!navigator.onLine){
+    toast('離線狀態，語音識別需要網路。可改用「自動播放」', 3500);
+    return;
+  }
   if(location.protocol === 'file:' && !sessionStorage.getItem('teleprompter:file-warned')){
     sessionStorage.setItem('teleprompter:file-warned', '1');
-    toast('提示：file:// 模式下每次都要重新授權麥克風，建議用「啟動-Mac.command」開', 4000);
+    toast('file:// 模式下每次都要重新授權麥克風，建議用 啟動-Mac.command 開', 4000);
   }
-  // 預先取得麥克風 stream 並持有——後續 SR 重啟全部走同一個權限，不會再彈授權彈窗
+
+  state.starting = true;
+  const startGen = state.recognitionToken;
   const micOk = await ensureMicStream();
+  state.starting = false;
   if(!micOk) return;
-  // 若已有舊的 SR，先確實清掉（避免 lang 切換或快速重啟雙開）
+  // await 期間使用者可能按了停止 / 切了 mode，token 已 ++ → 放棄此次啟動
+  if(state.recognitionToken !== startGen && state.mode !== 'voice') return;
+
+  // 若已有舊 SR（少數情況：lang 切換邊界），徹底清掉避免雙開
   if(state.recognition){
     const oldRec = state.recognition;
     try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
@@ -910,10 +1028,9 @@ async function startVoice(opts){
   state.stuckWarned = false;
 
   rec.onresult = (ev) => {
-    if(myToken !== state.recognitionToken) return;       // 不是當前 SR 的回呼，忽略
+    if(myToken !== state.recognitionToken) return;
     if(state.charNorms.length === 0) return;
 
-    // 用 watermark 避免同一筆 final 在多次 onresult 被重複累加
     let interim = '';
     for(let i = ev.resultIndex; i < ev.results.length; i++){
       const r = ev.results[i];
@@ -926,7 +1043,7 @@ async function startVoice(opts){
         interim += r[0].transcript;
       }
     }
-    // 激進截尾：只保留最近 ~40 字。太長會讓 recent 對到「已念過的歷史」而非「現在正在念的」
+    // 激進截尾，避免 recent 對到「已念過的歷史」
     if(state.recognitionBaseFinal.length > 80){
       state.recognitionBaseFinal = state.recognitionBaseFinal.slice(-40);
     }
@@ -936,35 +1053,51 @@ async function startVoice(opts){
     if(recent.length < 4) return;
 
     const newIdx = alignAndAdvance(recent);
-    // 卡住偵測：onresult 一直觸發但 charIdx 8 秒沒動 → 提示使用者按 R
+
+    // 卡住偵測：onresult 觸發但 charIdx 沒動
     if(newIdx === state.charIdx){
       if(state.lastAdvanceAt === 0) state.lastAdvanceAt = Date.now();
-      else if(!state.stuckWarned && Date.now() - state.lastAdvanceAt > 8000){
+      else if(!state.stuckWarned && Date.now() - state.lastAdvanceAt > 6000){
+        // 卡 6 秒：自動把 charIdx 拉到視線中央位置（不只 toast，主動 self-heal）
+        const fallbackIdx = findCharIdxNearViewportCenter();
+        if(fallbackIdx > state.charIdx){
+          const prev = state.charIdx;
+          state.charIdx = fallbackIdx;
+          state.lastAdvanceAt = Date.now();
+          state.recognitionBaseFinal = '';
+          state.recognitionLastFinalIndex = ev.results.length;
+          updateHighlight(prev);
+          toast('已自動對齊到目前視線位置', 1800);
+        }
         state.stuckWarned = true;
-        toast('對不到稿件了，按 R 從目前位置重新對齊', 3000);
+        if(Date.now() - state.lastAdvanceAt > 10000){
+          toast('對不上時可按 R 重對齊到目前位置', 3000);
+        }
       }
       return;
     }
+
     if(newIdx > state.charIdx && newIdx <= state.charSpans.length){
       const prevIdx = state.charIdx;
       state.charIdx = newIdx;
       state.lastAdvanceAt = Date.now();
       state.stuckWarned = false;
-      // 使用者剛剛手動拖曳/滾動過，先讓它穩 1.5 秒，避免 voice 把畫面拉走
-      if(Date.now() - state.manualScrollLock > 1500){
+      // 手動拖曳鎖定期間（觸控設備拉長到 3 秒）不更新 targetPosition，避免畫面飛走
+      const lockMs = matchMedia('(pointer: coarse)').matches ? 3000 : 1500;
+      if(Date.now() - state.manualScrollLock > lockMs){
         state.targetPosition = targetForCharIdx(state.charIdx);
         ensureLoop();
       }
       updateHighlight(prevIdx);
       els.recogStrip.innerHTML = '正在唸：<b>' + escapeHtml(recent) + '</b>';
       if(state.charIdx >= state.charSpans.length){
-        // 念到稿尾：直接 hard set 位置到 target，不要靠緩動（不然 600ms 內走不完最後一段）
+        // 念到稿尾：hard set 位置到 target、慶祝動畫，但**不**自動關麥
+        // 留 outro 空間：使用者可繼續講「謝謝收看」「下次見」，自己按停止才釋放麥克風
         state.targetPosition = targetForCharIdx(state.charIdx);
         state.position = state.targetPosition;
         applyScroll();
         celebrateCompletion();
-        toast('稿件結束 ✓');
-        setTimeout(stopVoice, 1200);   // 拉長到 1.2 秒，留時間看到完成動畫
+        toast('稿件結束 ✓ 麥克風保持開啟，可繼續念 outro', 4000);
       }
     }
   };
@@ -972,18 +1105,21 @@ async function startVoice(opts){
     if(myToken !== state.recognitionToken) return;
     if(e.error === 'no-speech') return;
     if(e.error === 'not-allowed' || e.error === 'service-not-allowed'){
-      toast('麥克風權限被拒絕');
+      const isMac = /Mac/i.test(navigator.platform);
+      toast(isMac
+        ? '麥克風被拒。請至「系統設定 → 隱私 → 麥克風」開啟瀏覽器'
+        : '點網址列鎖頭 → 網站設定 → 麥克風 → 允許', 5000);
       stopVoice();
     }else if(e.error === 'audio-capture'){
-      toast('找不到麥克風，請檢查裝置');
+      toast('找不到麥克風，請檢查裝置', 3000);
       stopVoice();
     }else if(e.error === 'network'){
-      toast('語音識別需要網路連線');
+      toast('語音識別需要網路連線', 3000);
     }else if(e.error === 'language-not-supported'){
-      toast('此語言模型不支援，請換一種語言');
+      toast('此語言模型不支援，請換一種', 3000);
       stopVoice();
     }else if(e.error === 'aborted'){
-      // 使用者主動停或切換，正常
+      // 使用者主動停或切換
     }else{
       toast('語音識別錯誤：' + e.error);
     }
@@ -992,12 +1128,12 @@ async function startVoice(opts){
     if(myToken !== state.recognitionToken) return;
     if(state.mode !== 'voice') return;
 
-    // 限頻自動重啟：100ms 內又結束代表異常（權限被拒、裝置失效），停止重試
+    // 限頻自動重啟（200ms 容錯）
     const now = Date.now();
-    if(now - state.recognitionLastEndAt < 100){
+    if(now - state.recognitionLastEndAt < 200){
       state.recognitionRestartCount++;
       if(state.recognitionRestartCount >= 3){
-        toast('語音識別頻繁中斷，已停止');
+        toast('語音識別頻繁中斷，已停止', 3000);
         stopVoice();
         return;
       }
@@ -1005,11 +1141,19 @@ async function startVoice(opts){
       state.recognitionRestartCount = 0;
     }
     state.recognitionLastEndAt = now;
-    setTimeout(() => {
+
+    // 重啟改用 new SR：避開 Chrome 122+ 對舊 rec 物件 start() 的 InvalidStateError
+    clearTimerRef('onendRestart');
+    state.timers.onendRestart = setTimeout(() => {
       if(myToken === state.recognitionToken && state.mode === 'voice'){
-        try{ rec.start(); }catch(e){}
+        // 不是 rec.start()——而是建新 SR
+        try{
+          rec.onresult = null; rec.onerror = null; rec.onend = null;
+        }catch(e){}
+        state.recognition = null;
+        startVoice({silent:true});
       }
-    }, 50);
+    }, 150);
   };
 
   try{
@@ -1018,21 +1162,24 @@ async function startVoice(opts){
     setMode('voice');
     if(!opts.silent) toast('開始語音跟讀，請開始念稿', 1800);
   }catch(e){
-    toast('無法啟動麥克風：' + e.message);
+    if(e.name === 'InvalidStateError'){
+      // 罕見：剛 abort 的 SR 內部還沒乾淨。等一下再重試
+      setTimeout(() => { if(state.mode === 'voice') startVoice({silent:true}); }, 300);
+    }else{
+      toast('無法啟動麥克風：' + e.message);
+    }
   }
 }
 function stopVoice(){
-  if(state.recognition){
-    const oldRec = state.recognition;
-    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
-    state.recognition = null;
-  }
-  state.recognitionToken++;  // 讓任何延遲觸發的舊回呼都被過濾掉
-  releaseMicStream();        // 釋放麥克風 stream（瀏覽器分頁紅燈會熄）
+  disposeRecognition();
+  releaseMicStream();
   setMode('idle');
 }
 function toggleVoice(){
+  if(state.starting) return;
+  if(state.counting) cancelCountdown();
   if(state.mode === 'voice') stopVoice();
+  else if(state.mode === 'auto') { setMode('idle'); startVoice(); }
   else startVoice();
 }
 
@@ -1048,40 +1195,59 @@ function escapeHtml(s){
   return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]);
 }
 
-// Sliding-window alignment: find the best end position in script[currentIdx .. currentIdx+window]
-// such that the LAST chars of `recent` align (allowing skips). Returns advanced charIdx (= bestEnd + 1).
+// 字元對齊演算法：在 script[charIdx..charIdx+window] 找 recent 的最佳對齊終點
+// 升級版：① 多 anchor（最後 2 字）② density check（命中字必須夠密集）③ 跨段稿件 fallback
 function alignAndAdvance(recent){
-  // 沒可比的字／recent 太短 → 不推進，等更多文字
   if(state.charNorms.length === 0) return state.charIdx;
   if(recent.length < 4) return state.charIdx;
 
-  // clamp 防止 charIdx 越界（textarea 改稿後）
   const start = Math.min(state.charIdx, state.charNorms.length);
   const window = 80;
   const end = Math.min(state.charNorms.length - 1, start + window);
   if(end < start) return state.charIdx;
 
-  // gaps 上限相對於 recent 長度（每 3 字最多 1 跳，下限 2、上限 4）
   const gapLimit = Math.max(2, Math.min(4, Math.floor(recent.length * 0.33)));
-  // 反向比對範圍：recent 長度的 1.5 倍，避免允許過於稀疏的對齊
   const reverseSpan = Math.max(6, Math.floor(recent.length * 1.5));
-  // recent 越長要求越嚴
-  const minScore = recent.length >= 8 ? 4 : (recent.length >= 5 ? 3 : 3);
+  const minScore = recent.length >= 8 ? 4 : 3;
 
   let bestEnd = -1;
   let bestScore = 0;
   const lastChar = recent[recent.length - 1];
+  const secondLastChar = recent.length >= 2 ? recent[recent.length - 2] : null;
 
+  // 第一輪：以 last char 為 anchor
   for(let e = start; e <= end; e++){
     if(state.charNorms[e] !== lastChar) continue;
-    let si = e - 1, ri = recent.length - 2, score = 1, gaps = 0;
+    let si = e - 1, ri = recent.length - 2, score = 1, gaps = 0, lastMatchSi = e;
     while(ri >= 0 && si >= start && gaps < gapLimit && (e - si) < reverseSpan){
-      if(state.charNorms[si] === recent[ri]){ score++; si--; ri--; }
+      if(state.charNorms[si] === recent[ri]){ score++; lastMatchSi = si; si--; ri--; }
       else { gaps++; si--; }
     }
-    // 平局取「靠 start 比較近」的位置——防止重複句／副歌直接跳到結尾
+    // density check：命中字之間平均距離不能超過 1.7（避免「a__b__c__d」這種稀疏對齊）
+    const span = e - lastMatchSi + 1;
+    const density = span > 0 ? score / span : 0;
+    if(density < 0.55) continue;
+    // 平局取靠 start 較近（防重複句跳到尾段）
     if(score > bestScore || (score === bestScore && (bestEnd === -1 || e < bestEnd))){
       bestScore = score; bestEnd = e;
+    }
+  }
+
+  // 第二輪：若 last char anchor 失敗，試 secondLastChar 當 anchor（救「念到一半剛說完一字立刻 onresult」的情況）
+  if(bestScore < minScore && secondLastChar !== null){
+    for(let e = start; e <= end - 1; e++){
+      if(state.charNorms[e] !== secondLastChar) continue;
+      let si = e - 1, ri = recent.length - 3, score = 1, gaps = 0, lastMatchSi = e;
+      while(ri >= 0 && si >= start && gaps < gapLimit && (e - si) < reverseSpan){
+        if(state.charNorms[si] === recent[ri]){ score++; lastMatchSi = si; si--; ri--; }
+        else { gaps++; si--; }
+      }
+      const span = e - lastMatchSi + 1;
+      const density = span > 0 ? score / span : 0;
+      if(density < 0.55) continue;
+      if(score > bestScore || (score === bestScore && (bestEnd === -1 || e < bestEnd))){
+        bestScore = score; bestEnd = e;
+      }
     }
   }
 
@@ -1094,24 +1260,22 @@ function alignAndAdvance(recent){
 // ============ Countdown ============
 const COUNTDOWN_CAPTIONS = {3:'深呼吸', 2:'看向鏡頭', 1:'準備'};
 function countdown(n, done){
-  _counting = true;
+  state.counting = true;
   els.countdown.classList.add('show');
   let i = n;
   const step = () => {
-    if(!_counting) return;   // 被 cancelCountdown 取消
+    if(!state.counting) return;
     if(i <= 0){
-      // 倒到 0：用 ▶ 圖示而非數字「0」，給「開拍」的 cue
       els.cdNum.textContent = '▶';
       els.cdCap.textContent = '';
-      _countdownTimer = setTimeout(() => {
-        _counting = false;
+      state.timers.countdown = setTimeout(() => {
+        state.counting = false;
         els.countdown.classList.remove('show');
         els.cdNum.textContent = '';
         done && done();
       }, 350);
       return;
     }
-    // 強制重啟 CSS 動畫：先移除 show class、強制 reflow、再加回去
     els.cdNum.style.animation = 'none';
     els.cdCap.style.animation = 'none';
     void els.cdNum.offsetWidth;
@@ -1120,48 +1284,81 @@ function countdown(n, done){
     els.cdNum.textContent = i;
     els.cdCap.textContent = COUNTDOWN_CAPTIONS[i] || '';
     i--;
-    _countdownTimer = setTimeout(step, 700);
+    state.timers.countdown = setTimeout(step, 700);
   };
   step();
 }
 
-// ============ Fullscreen ============
+// ============ Fullscreen ============（含 webkit prefix fallback）
 function fullscreen(){
-  if(!document.fullscreenElement){
-    if(document.documentElement.requestFullscreen){
-      document.documentElement.requestFullscreen().catch(() => toast('全螢幕請求被拒'));
+  const inFs = document.fullscreenElement || document.webkitFullscreenElement;
+  if(!inFs){
+    const el = document.documentElement;
+    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitRequestFullScreen;
+    if(req){
+      req.call(el).catch(() => toast('全螢幕請求被拒'));
     }else{
-      // iOS Safari fallback：用 CSS 模擬全螢幕
-      document.body.classList.add('fullscreen');
+      document.body.classList.add('fullscreen');  // iOS Safari fallback
     }
   }else{
-    document.exitFullscreen?.();
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if(exit) exit.call(document);
     document.body.classList.remove('fullscreen');
   }
 }
-// 雙向同步：使用者按 F11 進系統全螢幕也能切換 layout
-document.addEventListener('fullscreenchange', () => {
-  document.body.classList.toggle('fullscreen', !!document.fullscreenElement);
-  // 全螢幕進出時 layout 大改，必須 reanchor，否則 voice mode 會錯位
-  setTimeout(reanchor, 50);
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev =>
+  document.addEventListener(ev, () => {
+    const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    document.body.classList.toggle('fullscreen', inFs);
+    setTimeout(reanchor, 200);  // Safari 需要 ≥ 200ms 才 layout 穩定
+  })
+);
+
+// ResizeObserver 加 feature detect（Safari 13.0 / 老瀏覽器沒這 API 會直接 throw）
+if(typeof ResizeObserver !== 'undefined'){
+  const _resizeObserver = new ResizeObserver(() => {
+    if(state.charSpans.length > 0) reanchor();
+  });
+  window.addEventListener('load', () => {
+    if(els.scrollInner) _resizeObserver.observe(els.scrollInner);
+  });
+}
+window.addEventListener('resize', () => reanchor());
+
+// 切到背景／回前景：voice 模式下避免 RAF throttle 造成的位置漂移
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden){
+    if(state.mode === 'voice') state.position = state.targetPosition;
+  }else{
+    if(state.mode === 'voice'){
+      state.position = state.targetPosition;
+      applyScroll();
+      ensureLoop();
+    }
+  }
 });
 
-// 視窗 resize / 字體載入完 / scrollInner 大小變動都重對齊
-const _resizeObserver = new ResizeObserver(() => {
-  if(state.charSpans.length > 0) reanchor();
+// 網路狀態
+window.addEventListener('offline', () => {
+  if(state.mode === 'voice'){ toast('已離線，跟讀已停止', 3000); stopVoice(); }
 });
-window.addEventListener('load', () => {
-  if(els.scrollInner) _resizeObserver.observe(els.scrollInner);
-});
-window.addEventListener('resize', () => reanchor());
+window.addEventListener('online', () => toast('網路已恢復', 1500));
 
 // ============ Wiring ============
 // textarea input 用 debounce 重建 DOM，長腳本不卡
-let _renderTimer = null;
 els.script.addEventListener('input', () => {
-  save();   // save 自己會 debounce
-  clearTimeout(_renderTimer);
-  _renderTimer = setTimeout(() => renderText(), 150);
+  save();
+  clearTimerRef('render');
+  state.timers.render = setTimeout(() => {
+    renderText();
+    // 改稿後 voice 模式必須清掉舊辨識歷史 + 重啟 SR，否則 baseFinal 對齊到舊位置
+    if(state.mode === 'voice'){
+      state.recognitionBaseFinal = '';
+      state.recognitionLastFinalIndex = 0;
+      state.lastAdvanceAt = 0;
+      state.stuckWarned = false;
+    }
+  }, 150);
 });
 els.speed.addEventListener('input', e => setSpeed(e.target.value));
 els.speedNum.addEventListener('input', e => setSpeed(e.target.value));
@@ -1178,14 +1375,16 @@ els.resetBtn.addEventListener('click', reset);
 els.fsBtn.addEventListener('click', fullscreen);
 els.micBtn.addEventListener('click', toggleVoice);
 
-let _langSwitchTimer = null;
 els.lang.addEventListener('change', e => {
   state.lang = e.target.value; save();
   if(state.mode === 'voice'){
-    // 用單一 timer 避免快速連切時雙開 SR
-    clearTimeout(_langSwitchTimer);
+    clearTimerRef('langSwitch');
     stopVoice();
-    _langSwitchTimer = setTimeout(() => startVoice({silent:true}), 200);
+    const myGen = state.recognitionToken;
+    state.timers.langSwitch = setTimeout(() => {
+      // mode 跟 token 都要對才啟動
+      if(state.recognitionToken === myGen) startVoice({silent:true});
+    }, 200);
   }
 });
 
@@ -1258,36 +1457,27 @@ setFontSize(state.fontSize);
 setLineHeight(state.lineHeight);
 setFontColor(state.fontColor);
 setBgColor(state.bgColor);
-if(!els.script.value){
-  els.script.value =
-`大家好，這是一段示範稿件。
-
-提詞機支援兩種模式：自動播放與語音跟讀。
-按下「跟讀」按鈕，授權麥克風後就能開始唸。
-系統會即時辨識你正在唸的字，自動把那一句捲到視線指示線。
-
-唸快它就跟著快，唸慢它就停下來等你。
-標點符號、空白會被忽略，只比對實際的字。
-
-如果中間漏了一兩個字，演算法會用模糊比對找回位置；
-但如果你跳到下一段或重念一句，畫面有可能對不準，
-這時候按 R 重置就好。
-
-請把瀏覽器靠近鏡頭，眼睛盯著虛線，準備好了就按下方麥克風。`;
-}
+// 不再塞示範稿件——改用 placeholder 提示，避免使用者第一次按全螢幕直接念到示範文
+// renderText 在空稿時會顯示「（在左側輸入或匯入講稿…）」當 placeholder
 renderText();
 applyScroll();
 
+// 偵測平台 & SR 能力
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+const isMacSafari = !isIOS && /^((?!chrome|android|crios).)*safari/i.test(navigator.userAgent);
+const isPWA = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+
 if(!speechSupported()){
   els.micBtn.disabled = true;
-  els.micBtn.title = '此瀏覽器不支援語音識別（請用 Chrome / Edge）';
-}else{
-  // iOS Safari 雖然有 webkitSpeechRecognition 但 continuous 模式行為破碎
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-  if(isIOS || (isSafari && !/Chromium|Edg/.test(navigator.userAgent))){
-    els.micBtn.title = 'Safari/iOS 對連續語音識別支援有限，建議用桌面 Chrome';
-  }
+  els.micBtn.title = '此瀏覽器不支援語音識別（請改用 Chrome / Edge）';
+  els.micBtn.textContent = '🎤 不支援';
+}else if(isIOS){
+  // iOS Safari 連續模式破碎、PWA 模式 SR 完全壞——直接 disable，引導用桌面
+  els.micBtn.disabled = true;
+  els.micBtn.title = 'iOS 連續語音識別行為破碎，請用桌面 Chrome';
+  els.micBtn.textContent = '🎤 iOS 不支援';
+}else if(isMacSafari){
+  els.micBtn.title = 'Safari 對連續語音識別支援有限，建議用 Chrome / Edge';
 }
 </script>
 </body>
