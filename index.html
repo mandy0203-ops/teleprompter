@@ -1,0 +1,1221 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>提詞機 · 語音跟讀</title>
+<style>
+:root{
+  --bg:#f3ede4;
+  --panel:#ebe2d4;
+  --ink:#3a342c;
+  --ink-soft:#6b5f51;
+  --line:#d6c9b5;
+  --accent:#a87a5a;
+  --accent-soft:#c8a888;
+  --warn:#b46a55;
+  --ok:#7e9079;
+  --shadow:0 4px 18px rgba(80,60,40,.08);
+  --radius:12px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;
+  background:var(--bg);
+  color:var(--ink);
+  overflow:hidden;
+}
+header{
+  display:flex;align-items:center;gap:14px;
+  padding:10px 16px;background:var(--panel);
+  border-bottom:1px solid var(--line);
+  flex-wrap:wrap;
+}
+header h1{
+  font-size:16px;margin:0;font-weight:600;letter-spacing:1px;
+  color:var(--ink);
+}
+header h1 small{color:var(--ink-soft);font-weight:400;margin-left:6px;font-size:12px}
+
+.mode-pill{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg);border:1px solid var(--line);
+  padding:4px 10px;border-radius:999px;font-size:12px;color:var(--ink-soft);
+}
+.mode-pill .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-soft)}
+.mode-pill.live .dot{background:var(--warn);box-shadow:0 0 0 0 var(--warn);animation:pulse 1.6s infinite}
+@keyframes pulse{
+  0%{box-shadow:0 0 0 0 rgba(180,106,85,.6)}
+  70%{box-shadow:0 0 0 8px rgba(180,106,85,0)}
+  100%{box-shadow:0 0 0 0 rgba(180,106,85,0)}
+}
+
+.controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;flex:1;min-width:0}
+.group{
+  display:flex;align-items:center;gap:6px;
+  background:var(--bg);padding:4px 10px;border-radius:8px;
+  border:1px solid var(--line);
+  flex-shrink:0;
+}
+.group label{font-size:12px;color:var(--ink-soft);white-space:nowrap}
+.group input[type=range]{width:80px;accent-color:var(--accent)}
+.group input[type=number]{
+  width:48px;border:none;background:transparent;color:var(--ink);
+  font-size:13px;text-align:center;
+  -moz-appearance:textfield;
+}
+.group input[type=number]::-webkit-outer-spin-button,
+.group input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+.group input[type=color]{width:22px;height:22px;border:none;background:transparent;cursor:pointer;padding:0}
+.group select{
+  border:none;background:transparent;color:var(--ink);
+  font-size:13px;font-family:inherit;outline:none;cursor:pointer;
+}
+
+button{
+  border:1px solid var(--line);
+  background:var(--bg);
+  color:var(--ink);
+  padding:6px 12px;border-radius:8px;cursor:pointer;
+  font-size:13px;font-family:inherit;
+  display:inline-flex;align-items:center;gap:6px;
+  transform:translateY(0);
+  box-shadow:0 1px 0 rgba(80,60,40,.04);
+  transition:transform .12s ease, box-shadow .12s ease, background .15s, border-color .15s, color .15s;
+}
+button:hover{
+  background:var(--accent-soft);border-color:var(--accent-soft);color:#fff;
+  transform:translateY(-1px);
+  box-shadow:0 4px 10px rgba(80,60,40,.14);
+}
+button:active{transform:translateY(0);box-shadow:inset 0 1px 2px rgba(80,60,40,.18)}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent);box-shadow:0 2px 0 rgba(120,80,55,.25)}
+button.primary:hover{background:var(--ink);border-color:var(--ink);box-shadow:0 4px 12px rgba(58,52,44,.3)}
+button.ghost{background:transparent}
+button.toggle.on{background:var(--ok);color:#fff;border-color:var(--ok)}
+button.mic.on{background:var(--warn);color:#fff;border-color:var(--warn)}
+button:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+
+main{
+  display:grid;grid-template-columns:380px 1fr;
+  height:calc(100vh - 54px);
+}
+.editor{
+  background:var(--panel);
+  border-right:1px solid var(--line);
+  display:flex;flex-direction:column;
+}
+.editor .editor-head{
+  padding:10px 14px;display:flex;justify-content:space-between;align-items:center;
+  border-bottom:1px solid var(--line);
+}
+.editor .editor-head span{font-size:12px;color:var(--ink-soft)}
+.editor textarea{
+  flex:1;border:none;outline:none;resize:none;
+  background:transparent;
+  padding:14px 16px;font-size:14px;line-height:1.7;color:var(--ink);
+  font-family:inherit;
+}
+
+.stage{
+  position:relative;
+  background:var(--ink);
+  overflow:hidden;
+}
+.scroll{
+  position:absolute;inset:0;
+  overflow:hidden;
+  display:flex;justify-content:center;
+}
+.scroll-inner{
+  width:100%;max-width:900px;
+  padding:50vh 8% 60vh 8%;
+  color:#f3ede4;
+  font-weight:500;
+  white-space:pre-wrap;
+  word-break:break-word;
+  transition:none;
+}
+.ch{display:inline;transition:color .25s,opacity .25s}
+.ch.spoken{color:var(--accent-soft);opacity:.55}
+.ch.current{
+  color:#fff;
+  background:rgba(168,122,90,.35);
+  border-radius:3px;padding:0 2px;margin:0 -2px;
+}
+
+/* 視線指示線：漸層淡出 + 中央發光圓點，比 dashed+三角形更有「視線落點」儀式感 */
+.indicator{
+  position:absolute;left:0;right:0;top:50%;
+  height:1px;
+  background:linear-gradient(90deg,
+    transparent 0%,
+    rgba(200,168,136,.25) 18%,
+    rgba(200,168,136,.5) 50%,
+    rgba(200,168,136,.25) 82%,
+    transparent 100%);
+  pointer-events:none;
+  transition:background .4s ease;
+}
+.indicator::before{
+  content:"";position:absolute;left:50%;top:50%;
+  width:7px;height:7px;border-radius:50%;
+  background:var(--accent);
+  transform:translate(-50%,-50%);
+  box-shadow:0 0 12px rgba(168,122,90,.55);
+  transition:box-shadow .4s ease, background .4s ease;
+}
+/* voice 模式：整條線呼吸，中央點光暈也跟著脈動，給「機器活著」的安全感 */
+.indicator.listening{
+  animation:line-breathe 2.2s ease-in-out infinite;
+}
+.indicator.listening::before{
+  animation:dot-breathe 2.2s ease-in-out infinite;
+}
+@keyframes line-breathe{
+  0%,100%{opacity:.7}
+  50%{opacity:1}
+}
+@keyframes dot-breathe{
+  0%,100%{box-shadow:0 0 12px rgba(168,122,90,.55)}
+  50%{box-shadow:0 0 24px rgba(200,168,136,.85)}
+}
+
+.stage.mirror-h .scroll-inner{transform:scaleX(-1)}
+.stage.mirror-v .scroll-inner{transform:scaleY(-1)}
+.stage.mirror-h.mirror-v .scroll-inner{transform:scale(-1,-1)}
+
+.progress{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(243,237,228,.08);overflow:hidden}
+.progress-bar{height:100%;background:var(--accent-soft);width:0%;transition:width .1s linear}
+/* 完成那一刻的金光掃過 */
+.progress-bar.done{
+  background:linear-gradient(90deg, var(--accent-soft), #e8d3b6, var(--accent-soft));
+  background-size:200% 100%;
+  animation:shine 1.2s ease-out;
+  box-shadow:0 0 16px rgba(200,168,136,.6);
+}
+@keyframes shine{
+  0%{background-position:200% 0}
+  100%{background-position:-200% 0}
+}
+
+/* 完成 ✓ 圖示——念到稿尾時短暫出現 */
+.completion-mark{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  pointer-events:none;opacity:0;
+  font-size:18vh;color:var(--accent-soft);font-weight:300;
+  transition:opacity .4s ease;
+}
+.completion-mark.show{
+  opacity:1;
+  animation:check-pop .6s cubic-bezier(.2,.8,.3,1.2);
+}
+@keyframes check-pop{
+  0%{transform:scale(.6);opacity:0}
+  60%{transform:scale(1.08);opacity:1}
+  100%{transform:scale(1);opacity:1}
+}
+
+/* 倒數：數字脈動進場、下方有引導文字（深呼吸/看鏡頭/準備） */
+.countdown{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:24px;
+  pointer-events:none;opacity:0;
+  transition:opacity .25s ease;
+}
+.countdown.show{opacity:1}
+.countdown .cd-num{
+  font-size:22vh;color:var(--accent-soft);
+  font-weight:300;letter-spacing:-.04em;
+  line-height:1;
+  animation:num-pop .55s ease-out;
+}
+.countdown .cd-cap{
+  font-size:2.4vh;color:rgba(243,237,228,.55);
+  letter-spacing:.3em;font-weight:400;
+  animation:cap-fade .55s ease-out;
+}
+@keyframes num-pop{
+  0%{transform:scale(1.5);opacity:0}
+  35%{transform:scale(1);opacity:1}
+  100%{transform:scale(.95);opacity:.85}
+}
+@keyframes cap-fade{
+  0%{opacity:0;transform:translateY(8px)}
+  60%{opacity:.55;transform:translateY(0)}
+  100%{opacity:.55;transform:translateY(0)}
+}
+
+/* 浮動麥克風指示器：全螢幕下也會看到，讓使用者知道機器正在聽 */
+.stage-mic-pill{
+  position:absolute;top:18px;right:18px;
+  display:none;align-items:center;gap:8px;
+  background:rgba(180,106,85,.92);color:#fff;
+  padding:6px 12px;border-radius:999px;
+  font-size:12px;letter-spacing:.5px;
+  box-shadow:0 4px 14px rgba(0,0,0,.25);
+  pointer-events:none;
+  z-index:5;
+}
+.stage-mic-pill.show{display:inline-flex;animation:mic-fadein .3s ease}
+.stage-mic-pill .live-dot{
+  width:7px;height:7px;border-radius:50%;background:#fff;
+  animation:mic-blink 1.4s ease-in-out infinite;
+}
+@keyframes mic-blink{
+  0%,100%{opacity:.4}
+  50%{opacity:1}
+}
+@keyframes mic-fadein{
+  from{opacity:0;transform:translateY(-6px)}
+  to{opacity:1;transform:translateY(0)}
+}
+
+.hint{
+  position:absolute;left:14px;bottom:14px;
+  font-size:11px;color:rgba(243,237,228,.4);
+  font-family:ui-monospace,Menlo,monospace;line-height:1.6;
+  pointer-events:none;user-select:none;
+}
+
+.recog-strip{
+  position:absolute;right:14px;bottom:14px;max-width:40%;
+  font-size:12px;color:rgba(243,237,228,.55);
+  font-family:ui-monospace,Menlo,monospace;
+  text-align:right;line-height:1.5;
+  pointer-events:none;
+}
+.recog-strip b{color:var(--accent-soft);font-weight:500}
+
+.toast{
+  position:absolute;top:18px;left:50%;transform:translateX(-50%);
+  background:rgba(180,106,85,.92);color:#fff;
+  padding:10px 18px;border-radius:8px;font-size:13px;
+  box-shadow:0 6px 20px rgba(0,0,0,.3);
+  opacity:0;pointer-events:none;transition:opacity .25s;
+  max-width:80%;
+}
+.toast.show{opacity:1}
+
+.fullscreen .editor{display:none}
+.fullscreen main{grid-template-columns:1fr}
+.fullscreen header{display:none}
+.fullscreen .stage{height:100vh}
+
+@media (max-width:640px), (pointer:coarse) and (max-width:900px){
+  main{grid-template-columns:1fr;grid-template-rows:35vh 1fr}
+  .editor{border-right:none;border-bottom:1px solid var(--line)}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>提詞機 <small>語音跟讀 · Voice-Follow</small></h1>
+  <span class="mode-pill" id="modePill" role="status" aria-live="polite"><span class="dot"></span><span id="modeLabel">手動</span></span>
+  <div class="controls">
+    <div class="group">
+      <label>速度</label>
+      <input type="range" id="speed" min="1" max="100" value="30">
+      <input type="number" id="speedNum" min="1" max="100" value="30">
+    </div>
+    <div class="group">
+      <label>字級</label>
+      <input type="range" id="fontSize" min="24" max="160" value="64">
+      <input type="number" id="fontSizeNum" min="24" max="160" value="64">
+    </div>
+    <div class="group">
+      <label>行高</label>
+      <input type="range" id="lineHeight" min="100" max="240" value="160">
+      <input type="number" id="lineHeightNum" min="100" max="240" value="160">
+    </div>
+    <div class="group">
+      <label>語音</label>
+      <select id="lang">
+        <option value="zh-TW">繁體中文</option>
+        <option value="zh-CN">簡體中文</option>
+        <option value="en-US">English</option>
+        <option value="ja-JP">日本語</option>
+      </select>
+    </div>
+    <div class="group">
+      <label>字</label>
+      <input type="color" id="fontColor" value="#f3ede4">
+      <label>底</label>
+      <input type="color" id="bgColor" value="#3a342c">
+    </div>
+    <button class="toggle" id="mirrorH" title="水平鏡像">⇋</button>
+    <button class="toggle" id="mirrorV" title="垂直鏡像">⇅</button>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button id="importBtn" class="ghost" title="匯入 .txt">匯入</button>
+    <input type="file" id="importFile" accept=".txt,.md" hidden>
+    <button id="resetBtn" class="ghost" title="R">重置</button>
+    <button id="micBtn" class="mic" title="V" aria-label="切換語音跟讀">🎤 跟讀</button>
+    <button id="playBtn" class="primary" title="空白鍵" aria-label="切換自動播放">▶ 自動</button>
+    <button id="fsBtn" class="ghost" title="F">全螢幕</button>
+  </div>
+</header>
+
+<main>
+  <section class="editor">
+    <div class="editor-head">
+      <span id="charCount">0 字</span>
+      <span>稿件</span>
+    </div>
+    <textarea id="script" placeholder="把講稿貼進來，或點上方「匯入」載入 .txt"></textarea>
+  </section>
+  <section class="stage" id="stage">
+    <div class="scroll" id="scroll">
+      <div class="scroll-inner" id="scrollInner"></div>
+    </div>
+    <div class="indicator" id="indicator"></div>
+    <div class="stage-mic-pill" id="stageMicPill"><span class="live-dot"></span>跟讀中</div>
+    <div class="completion-mark" id="completionMark">✓</div>
+    <div class="countdown" id="countdown"><span class="cd-num"></span><span class="cd-cap"></span></div>
+    <div class="hint">空白＝自動播放　V＝語音跟讀　↑↓＝速度　R＝重置　F＝全螢幕</div>
+    <div class="recog-strip" id="recogStrip"></div>
+    <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="toast" id="toast"></div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+
+const els = {
+  script: $('#script'),
+  charCount: $('#charCount'),
+  scroll: $('#scroll'),
+  scrollInner: $('#scrollInner'),
+  speed: $('#speed'), speedNum: $('#speedNum'),
+  fontSize: $('#fontSize'), fontSizeNum: $('#fontSizeNum'),
+  lineHeight: $('#lineHeight'), lineHeightNum: $('#lineHeightNum'),
+  fontColor: $('#fontColor'),
+  bgColor: $('#bgColor'),
+  mirrorH: $('#mirrorH'), mirrorV: $('#mirrorV'),
+  playBtn: $('#playBtn'), resetBtn: $('#resetBtn'), fsBtn: $('#fsBtn'),
+  micBtn: $('#micBtn'), lang: $('#lang'),
+  importBtn: $('#importBtn'), importFile: $('#importFile'),
+  stage: $('#stage'),
+  progressBar: $('#progressBar'),
+  countdown: $('#countdown'),
+  modePill: $('#modePill'), modeLabel: $('#modeLabel'),
+  recogStrip: $('#recogStrip'),
+  toast: $('#toast'),
+  indicator: $('#indicator'),
+  stageMicPill: $('#stageMicPill'),
+  completionMark: $('#completionMark'),
+  cdNum: document.querySelector('#countdown .cd-num'),
+  cdCap: document.querySelector('#countdown .cd-cap'),
+};
+
+const state = {
+  mode:'idle',          // 'idle' | 'auto' | 'voice'
+  speed:30,
+  fontSize:64,
+  lineHeight:160,
+  fontColor:'#f3ede4',
+  bgColor:'#3a342c',
+  mirrorH:false, mirrorV:false,
+  lang:'zh-TW',
+  // scroll
+  position:0,           // current scroll px
+  targetPosition:0,     // smoothed target (voice mode)
+  lastT:0, raf:null,
+  // script tracking
+  charSpans:[],         // array of HTMLElement, only "real" chars
+  charNorms:[],         // normalized char array
+  charIdx:0,            // next char to read
+  // speech
+  recognition:null,
+  recognitionToken:0,           // 每次新建 SR 物件 +1，回呼用來確認自己還是當前那個
+  recognitionBaseFinal:'',      // 累積已處理的 final 文字（會滾動截尾）
+  recognitionLastFinalIndex:0,  // watermark：避免同一筆 final 被加兩次
+  recognitionLastEndAt:0,       // onend timestamp，限制自動重啟頻率
+  recognitionRestartCount:0,    // 短時間連續重啟次數
+  manualScrollLock:0,           // 手動拖曳/滾輪後鎖定 voice 對齊的 timestamp
+  lastAdvanceAt:0,              // 上次 charIdx 推進的時間
+  stuckWarned:false,            // 卡住提示是否已顯示（避免重複跳）
+};
+
+const STORAGE = 'teleprompter:v2';
+const PUNCT = /[\s\r\n，。！？、；：「」『』（）()【】[\]—…·.,!?;:'"`~@#$%^&*\-_=+/\\<>]/;
+
+// ============ Storage ============
+let _saveTimer = null;
+let _quotaWarned = false;
+function save(){
+  // debounce 避免 textarea 每打一個字都 stringify 寫 localStorage
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    try{
+      localStorage.setItem(STORAGE, JSON.stringify({
+        text: els.script.value,
+        speed:state.speed, fontSize:state.fontSize, lineHeight:state.lineHeight,
+        fontColor:state.fontColor, bgColor:state.bgColor,
+        mirrorH:state.mirrorH, mirrorV:state.mirrorV,
+        lang:state.lang,
+      }));
+    }catch(e){
+      console.warn('[teleprompter] save failed', e);
+      if(!_quotaWarned && (e.name === 'QuotaExceededError' || /quota/i.test(e.message||''))){
+        _quotaWarned = true;
+        toast('稿件過大，無法自動保存（localStorage 已滿）', 3000);
+      }
+    }
+  }, 300);
+  // 清掉舊版 key（v1）的殘留
+  try{ localStorage.removeItem('teleprompter:v1'); }catch(e){}
+}
+function load(){
+  let raw;
+  try{ raw = localStorage.getItem(STORAGE); }catch(e){ return; }
+  if(!raw) return;
+  let d;
+  try{ d = JSON.parse(raw); }catch(e){ console.warn('[teleprompter] load parse failed', e); return; }
+  if(typeof d !== 'object' || !d) return;
+  if(typeof d.text === 'string') els.script.value = d.text;
+  if(typeof d.speed === 'number') setSpeed(d.speed);
+  if(typeof d.fontSize === 'number') setFontSize(d.fontSize);
+  if(typeof d.lineHeight === 'number') setLineHeight(d.lineHeight);
+  if(typeof d.fontColor === 'string') setFontColor(d.fontColor);
+  if(typeof d.bgColor === 'string') setBgColor(d.bgColor);
+  // 用 !! 強制 boolean，避免 falsy 值漏清 class
+  toggleMirror('H', !!d.mirrorH);
+  toggleMirror('V', !!d.mirrorV);
+  if(typeof d.lang === 'string'){ state.lang = d.lang; els.lang.value = d.lang; }
+}
+
+// ============ Settings ============
+function setSpeed(v){
+  v = Math.max(1, Math.min(100, +v||1));
+  state.speed = v; els.speed.value = v; els.speedNum.value = v; save();
+}
+function setFontSize(v){
+  v = Math.max(24, Math.min(160, +v||64));
+  state.fontSize = v; els.fontSize.value = v; els.fontSizeNum.value = v;
+  els.scrollInner.style.fontSize = v + 'px';
+  reanchor();
+  save();
+}
+function setLineHeight(v){
+  v = Math.max(110, Math.min(240, +v||160));   // 下限拉到 110，避免大字級行間貼死
+  state.lineHeight = v; els.lineHeight.value = v; els.lineHeightNum.value = v;
+  els.scrollInner.style.lineHeight = (v/100);
+  reanchor();
+  save();
+}
+// layout 變動後（字級/行高/視窗 resize/全螢幕）重新對齊到當前 charIdx
+function reanchor(){
+  if(state.charSpans.length === 0) return;
+  state.targetPosition = targetForCharIdx(state.charIdx);
+  state.position = state.targetPosition;
+  applyScroll();
+}
+function setFontColor(v){
+  state.fontColor = v; els.fontColor.value = v;
+  els.scrollInner.style.color = v;
+  warnIfLowContrast();
+  save();
+}
+function setBgColor(v){
+  state.bgColor = v; els.bgColor.value = v;
+  els.stage.style.background = v;
+  warnIfLowContrast();
+  save();
+}
+function _luma(hex){
+  // 計算相對亮度（WCAG 用，sRGB 線性化簡化版）
+  const m = hex.match(/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i);
+  if(!m) return 0;
+  const v = [m[1],m[2],m[3]].map(h => {
+    const c = parseInt(h,16)/255;
+    return c <= 0.03928 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4);
+  });
+  return 0.2126*v[0] + 0.7152*v[1] + 0.0722*v[2];
+}
+function warnIfLowContrast(){
+  const l1 = _luma(state.fontColor) + 0.05;
+  const l2 = _luma(state.bgColor) + 0.05;
+  const ratio = l1 > l2 ? l1/l2 : l2/l1;
+  if(ratio < 3){
+    toast('字色與背景對比過低（' + ratio.toFixed(1) + ':1），畫面可能讀不清', 2400);
+  }
+}
+function toggleMirror(axis, force){
+  const key = axis === 'H' ? 'mirrorH' : 'mirrorV';
+  state[key] = force === undefined ? !state[key] : force;
+  els.stage.classList.toggle('mirror-h', state.mirrorH);
+  els.stage.classList.toggle('mirror-v', state.mirrorV);
+  els.mirrorH.classList.toggle('on', state.mirrorH);
+  els.mirrorV.classList.toggle('on', state.mirrorV);
+  save();
+}
+
+// ============ Render ============
+function normChar(c){
+  if(!c) return '';
+  c = c.toLowerCase();
+  if(PUNCT.test(c)) return '';
+  return c;
+}
+
+function renderText(){
+  const txt = els.script.value || '（在左側輸入或匯入講稿…）';
+  const frag = document.createDocumentFragment();
+  state.charSpans = [];
+  state.charNorms = [];
+  for(const ch of txt){
+    if(ch === '\n'){ frag.appendChild(document.createElement('br')); continue; }
+    const span = document.createElement('span');
+    span.className = 'ch';
+    span.textContent = ch;
+    const n = normChar(ch);
+    if(n){
+      span.dataset.i = state.charSpans.length;
+      state.charSpans.push(span);
+      state.charNorms.push(n);
+    }
+    frag.appendChild(span);
+  }
+  // textarea 改稿後 charIdx 可能越界，必須 clamp
+  if(state.charIdx > state.charSpans.length){
+    state.charIdx = state.charSpans.length;
+  }
+  els.scrollInner.replaceChildren(frag);
+  updateCharCount();
+  // 全量重畫（DOM 整片新換）
+  fullPaintHighlight();
+  // layout 變了，重算對齊位置
+  if(state.charIdx > 0){
+    state.targetPosition = targetForCharIdx(state.charIdx);
+    state.position = state.targetPosition;
+    applyScroll();
+  }
+}
+function updateCharCount(){
+  els.charCount.textContent = state.charNorms.length + ' 字';
+}
+// 增量更新：只動 [prevIdx, charIdx] 區間，避免每次 onresult 都掃 2000+ 個 span
+function updateHighlight(prevIdx){
+  if(prevIdx === undefined){ fullPaintHighlight(); return; }
+  const from = Math.max(0, Math.min(prevIdx, state.charIdx));
+  const to = Math.min(state.charSpans.length, Math.max(prevIdx, state.charIdx) + 1);
+  for(let i = from; i < to; i++){
+    const cls = state.charSpans[i].classList;
+    if(i < state.charIdx){ cls.add('spoken'); cls.remove('current'); }
+    else if(i === state.charIdx){ cls.add('current'); cls.remove('spoken'); }
+    else{ cls.remove('spoken','current'); }
+  }
+}
+function fullPaintHighlight(){
+  for(let i = 0; i < state.charSpans.length; i++){
+    const cls = state.charSpans[i].classList;
+    if(i < state.charIdx){ cls.add('spoken'); cls.remove('current'); }
+    else if(i === state.charIdx){ cls.add('current'); cls.remove('spoken'); }
+    else{ cls.remove('spoken','current'); }
+  }
+}
+
+// ============ Scroll ============
+function maxScroll(){
+  return Math.max(0, els.scrollInner.scrollHeight - els.scroll.clientHeight);
+}
+function applyScroll(){
+  els.scroll.scrollTop = state.position;
+  const max = maxScroll();
+  els.progressBar.style.width = max ? Math.min(100, state.position/max*100) + '%' : '0%';
+}
+function charY(i){
+  if(state.charSpans.length === 0) return 0;
+  // 自我 clamp：避免 charIdx >= length 時拿到 undefined → offsetTop=0 → 畫面跳回頂端
+  const idx = Math.max(0, Math.min(i, state.charSpans.length - 1));
+  const sp = state.charSpans[idx];
+  if(!sp) return 0;
+  return sp.offsetTop + sp.offsetHeight/2;
+}
+function targetForCharIdx(i){
+  if(state.charSpans.length === 0) return 0;
+  const y = charY(i);
+  return Math.max(0, Math.min(maxScroll(), y - els.scroll.clientHeight/2));
+}
+
+// ============ Loop ============
+function tick(t){
+  if(state.mode === 'idle'){ state.raf = null; return; }
+  if(!state.lastT) state.lastT = t;
+  const dt = (t - state.lastT) / 1000;
+  state.lastT = t;
+
+  if(state.mode === 'auto'){
+    const pxPerSec = state.speed * 5;
+    state.position += pxPerSec * dt;
+    const max = maxScroll();
+    if(state.position >= max){
+      state.position = max;
+      celebrateCompletion();
+      setMode('idle');
+    }
+    applyScroll();
+    state.raf = requestAnimationFrame(tick);
+  }else if(state.mode === 'voice'){
+    const diff = state.targetPosition - state.position;
+    if(Math.abs(diff) < 0.5){
+      // 已對齊到 target，沒必要繼續空轉 RAF；下次 targetPosition 改變時 ensureLoop() 重啟
+      state.position = state.targetPosition;
+      applyScroll();
+      state.raf = null;
+      return;
+    }
+    state.position += diff * Math.min(1, dt * 4);
+    applyScroll();
+    state.raf = requestAnimationFrame(tick);
+  }else{
+    state.raf = null;
+  }
+}
+
+function ensureLoop(){
+  if(!state.raf) state.raf = requestAnimationFrame(tick);
+}
+
+function setMode(m){
+  state.mode = m;
+  state.lastT = 0;
+  // 切到 idle/auto 時，若還有舊 SR 必須完整清理（不只是 stop，還要清回呼避免續啟）
+  if(m !== 'voice' && state.recognition){
+    const oldRec = state.recognition;
+    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
+    state.recognition = null;
+    state.recognitionToken++;
+  }
+  if(m === 'idle'){
+    els.playBtn.textContent = '▶ 自動';
+    els.playBtn.classList.add('primary');
+    els.modePill.classList.remove('live');
+    els.modeLabel.textContent = '手動';
+    els.micBtn.classList.remove('on');
+    els.micBtn.textContent = '🎤 跟讀';
+    els.indicator.classList.remove('listening');
+    els.stageMicPill.classList.remove('show');
+  }else if(m === 'auto'){
+    els.playBtn.textContent = '❚❚ 暫停';
+    els.playBtn.classList.remove('primary');
+    els.modePill.classList.add('live');
+    els.modeLabel.textContent = '自動播放';
+    els.micBtn.classList.remove('on');
+    els.micBtn.textContent = '🎤 跟讀';
+    els.indicator.classList.remove('listening');
+    els.stageMicPill.classList.remove('show');
+    ensureLoop();
+  }else if(m === 'voice'){
+    els.playBtn.textContent = '▶ 自動';
+    els.playBtn.classList.add('primary');
+    els.modePill.classList.add('live');
+    els.modeLabel.textContent = '語音跟讀';
+    els.micBtn.classList.add('on');
+    els.micBtn.textContent = '⏹ 停止';
+    // 視線指示線開始呼吸 + 浮動麥克風指示器（全螢幕也能看到）
+    els.indicator.classList.add('listening');
+    els.stageMicPill.classList.add('show');
+    ensureLoop();
+  }
+}
+
+function reset(){
+  // 停掉自動播放（會立刻往下衝），但保留麥克風授權
+  if(state.mode === 'auto') setMode('idle');
+  state.position = 0;
+  state.targetPosition = 0;
+  state.charIdx = 0;
+  state.recognitionBaseFinal = '';
+  state.recognitionLastFinalIndex = 0;
+  state.manualScrollLock = 0;
+  state.lastAdvanceAt = 0;
+  state.stuckWarned = false;
+  els.recogStrip.textContent = '';
+  resetCompletion();
+  updateHighlight();
+  applyScroll();
+
+  // 語音模式下：必須 abort + 重啟 SR，否則瀏覽器內部 ev.results 還累積著舊的 final，
+  // 下一次 onresult 會把已念過的歷史當新內容，charIdx 會直接被推到稿尾
+  if(state.mode === 'voice' && state.recognition){
+    const oldRec = state.recognition;
+    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
+    state.recognition = null;
+    setTimeout(() => {
+      if(state.mode === 'voice') startVoice({silent:true});
+    }, 80);
+    toast('已回到開頭，可繼續念稿', 1400);
+  }
+}
+
+// ============ Auto play ============
+let _countdownTimer = null;
+let _counting = false;
+function toggleAuto(){
+  // 倒數中再按一次：直接取消，不要疊兩個 setMode
+  if(_counting){
+    cancelCountdown();
+    return;
+  }
+  if(state.mode === 'auto') return setMode('idle');
+  // 自動播放跟語音跟讀互斥
+  if(state.mode === 'voice') stopVoice();
+  countdown(3, () => setMode('auto'));
+}
+function cancelCountdown(){
+  _counting = false;
+  clearTimeout(_countdownTimer);
+  els.countdown.classList.remove('show');
+  els.cdNum.textContent = '';
+  els.cdCap.textContent = '';
+}
+
+// ============ Completion ritual ============
+let _completionTimer = null;
+function celebrateCompletion(){
+  // 進度條金光掃過
+  els.progressBar.classList.add('done');
+  // 中央 ✓ 圖示彈出
+  els.completionMark.classList.add('show');
+  clearTimeout(_completionTimer);
+  _completionTimer = setTimeout(() => {
+    els.completionMark.classList.remove('show');
+  }, 1800);
+}
+function resetCompletion(){
+  els.progressBar.classList.remove('done');
+  els.completionMark.classList.remove('show');
+  clearTimeout(_completionTimer);
+}
+
+// ============ Voice follow ============
+function speechSupported(){
+  return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+function toast(msg, ms=2200){
+  els.toast.textContent = msg;
+  els.toast.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(()=> els.toast.classList.remove('show'), ms);
+}
+
+function startVoice(opts){
+  opts = opts || {};
+  if(!speechSupported()){
+    toast('此瀏覽器不支援語音識別，請改用 Chrome / Edge');
+    return;
+  }
+  if(state.charNorms.length === 0){
+    toast('請先在左側輸入講稿');
+    return;
+  }
+  // file:// 開啟時麥克風授權無法持久，第一次提示使用者
+  if(location.protocol === 'file:' && !sessionStorage.getItem('teleprompter:file-warned')){
+    sessionStorage.setItem('teleprompter:file-warned', '1');
+    toast('提示：file:// 模式下每次都要重新授權麥克風，建議用「啟動-Mac.command」開', 4000);
+  }
+  // 若已有舊的 SR，先確實清掉（避免 lang 切換或快速重啟雙開）
+  if(state.recognition){
+    const oldRec = state.recognition;
+    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
+    state.recognition = null;
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const rec = new SR();
+  rec.lang = state.lang || 'zh-TW';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+
+  const myToken = ++state.recognitionToken;
+  state.recognitionBaseFinal = '';
+  state.recognitionLastFinalIndex = 0;
+  state.recognitionLastEndAt = 0;
+  state.recognitionRestartCount = 0;
+  state.lastAdvanceAt = 0;
+  state.stuckWarned = false;
+
+  rec.onresult = (ev) => {
+    if(myToken !== state.recognitionToken) return;       // 不是當前 SR 的回呼，忽略
+    if(state.charNorms.length === 0) return;
+
+    // 用 watermark 避免同一筆 final 在多次 onresult 被重複累加
+    let interim = '';
+    for(let i = ev.resultIndex; i < ev.results.length; i++){
+      const r = ev.results[i];
+      if(r.isFinal){
+        if(i >= state.recognitionLastFinalIndex){
+          state.recognitionBaseFinal += r[0].transcript;
+          state.recognitionLastFinalIndex = i + 1;
+        }
+      }else{
+        interim += r[0].transcript;
+      }
+    }
+    // 激進截尾：只保留最近 ~40 字。太長會讓 recent 對到「已念過的歷史」而非「現在正在念的」
+    if(state.recognitionBaseFinal.length > 80){
+      state.recognitionBaseFinal = state.recognitionBaseFinal.slice(-40);
+    }
+
+    const all = state.recognitionBaseFinal + interim;
+    const recent = normalizeAll(all).slice(-16);
+    if(recent.length < 4) return;
+
+    const newIdx = alignAndAdvance(recent);
+    // 卡住偵測：onresult 一直觸發但 charIdx 8 秒沒動 → 提示使用者按 R
+    if(newIdx === state.charIdx){
+      if(state.lastAdvanceAt === 0) state.lastAdvanceAt = Date.now();
+      else if(!state.stuckWarned && Date.now() - state.lastAdvanceAt > 8000){
+        state.stuckWarned = true;
+        toast('對不到稿件了，按 R 從目前位置重新對齊', 3000);
+      }
+      return;
+    }
+    if(newIdx > state.charIdx && newIdx <= state.charSpans.length){
+      const prevIdx = state.charIdx;
+      state.charIdx = newIdx;
+      state.lastAdvanceAt = Date.now();
+      state.stuckWarned = false;
+      // 使用者剛剛手動拖曳/滾動過，先讓它穩 1.5 秒，避免 voice 把畫面拉走
+      if(Date.now() - state.manualScrollLock > 1500){
+        state.targetPosition = targetForCharIdx(state.charIdx);
+        ensureLoop();
+      }
+      updateHighlight(prevIdx);
+      els.recogStrip.innerHTML = '正在唸：<b>' + escapeHtml(recent) + '</b>';
+      if(state.charIdx >= state.charSpans.length){
+        celebrateCompletion();
+        toast('稿件結束 ✓');
+        setTimeout(stopVoice, 600);
+      }
+    }
+  };
+  rec.onerror = (e) => {
+    if(myToken !== state.recognitionToken) return;
+    if(e.error === 'no-speech') return;
+    if(e.error === 'not-allowed' || e.error === 'service-not-allowed'){
+      toast('麥克風權限被拒絕');
+      stopVoice();
+    }else if(e.error === 'audio-capture'){
+      toast('找不到麥克風，請檢查裝置');
+      stopVoice();
+    }else if(e.error === 'network'){
+      toast('語音識別需要網路連線');
+    }else if(e.error === 'language-not-supported'){
+      toast('此語言模型不支援，請換一種語言');
+      stopVoice();
+    }else if(e.error === 'aborted'){
+      // 使用者主動停或切換，正常
+    }else{
+      toast('語音識別錯誤：' + e.error);
+    }
+  };
+  rec.onend = () => {
+    if(myToken !== state.recognitionToken) return;
+    if(state.mode !== 'voice') return;
+
+    // 限頻自動重啟：100ms 內又結束代表異常（權限被拒、裝置失效），停止重試
+    const now = Date.now();
+    if(now - state.recognitionLastEndAt < 100){
+      state.recognitionRestartCount++;
+      if(state.recognitionRestartCount >= 3){
+        toast('語音識別頻繁中斷，已停止');
+        stopVoice();
+        return;
+      }
+    }else{
+      state.recognitionRestartCount = 0;
+    }
+    state.recognitionLastEndAt = now;
+    setTimeout(() => {
+      if(myToken === state.recognitionToken && state.mode === 'voice'){
+        try{ rec.start(); }catch(e){}
+      }
+    }, 50);
+  };
+
+  try{
+    rec.start();
+    state.recognition = rec;
+    setMode('voice');
+    if(!opts.silent) toast('開始語音跟讀，請開始念稿', 1800);
+  }catch(e){
+    toast('無法啟動麥克風：' + e.message);
+  }
+}
+function stopVoice(){
+  if(state.recognition){
+    const oldRec = state.recognition;
+    try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
+    state.recognition = null;
+  }
+  state.recognitionToken++;  // 讓任何延遲觸發的舊回呼都被過濾掉
+  setMode('idle');
+}
+function toggleVoice(){
+  if(state.mode === 'voice') stopVoice();
+  else startVoice();
+}
+
+function normalizeAll(s){
+  let out = '';
+  for(const c of s){
+    const n = normChar(c);
+    if(n) out += n;
+  }
+  return out;
+}
+function escapeHtml(s){
+  return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]);
+}
+
+// Sliding-window alignment: find the best end position in script[currentIdx .. currentIdx+window]
+// such that the LAST chars of `recent` align (allowing skips). Returns advanced charIdx (= bestEnd + 1).
+function alignAndAdvance(recent){
+  // 沒可比的字／recent 太短 → 不推進，等更多文字
+  if(state.charNorms.length === 0) return state.charIdx;
+  if(recent.length < 4) return state.charIdx;
+
+  // clamp 防止 charIdx 越界（textarea 改稿後）
+  const start = Math.min(state.charIdx, state.charNorms.length);
+  const window = 80;
+  const end = Math.min(state.charNorms.length - 1, start + window);
+  if(end < start) return state.charIdx;
+
+  // gaps 上限相對於 recent 長度（每 3 字最多 1 跳，下限 2、上限 4）
+  const gapLimit = Math.max(2, Math.min(4, Math.floor(recent.length * 0.33)));
+  // 反向比對範圍：recent 長度的 1.5 倍，避免允許過於稀疏的對齊
+  const reverseSpan = Math.max(6, Math.floor(recent.length * 1.5));
+  // recent 越長要求越嚴
+  const minScore = recent.length >= 8 ? 4 : (recent.length >= 5 ? 3 : 3);
+
+  let bestEnd = -1;
+  let bestScore = 0;
+  const lastChar = recent[recent.length - 1];
+
+  for(let e = start; e <= end; e++){
+    if(state.charNorms[e] !== lastChar) continue;
+    let si = e - 1, ri = recent.length - 2, score = 1, gaps = 0;
+    while(ri >= 0 && si >= start && gaps < gapLimit && (e - si) < reverseSpan){
+      if(state.charNorms[si] === recent[ri]){ score++; si--; ri--; }
+      else { gaps++; si--; }
+    }
+    // 平局取「靠 start 比較近」的位置——防止重複句／副歌直接跳到結尾
+    if(score > bestScore || (score === bestScore && (bestEnd === -1 || e < bestEnd))){
+      bestScore = score; bestEnd = e;
+    }
+  }
+
+  if(bestScore >= minScore && bestEnd >= start){
+    return bestEnd + 1;
+  }
+  return state.charIdx;
+}
+
+// ============ Countdown ============
+const COUNTDOWN_CAPTIONS = {3:'深呼吸', 2:'看向鏡頭', 1:'準備'};
+function countdown(n, done){
+  _counting = true;
+  els.countdown.classList.add('show');
+  let i = n;
+  const step = () => {
+    if(!_counting) return;   // 被 cancelCountdown 取消
+    if(i <= 0){
+      // 倒到 0：用 ▶ 圖示而非數字「0」，給「開拍」的 cue
+      els.cdNum.textContent = '▶';
+      els.cdCap.textContent = '';
+      _countdownTimer = setTimeout(() => {
+        _counting = false;
+        els.countdown.classList.remove('show');
+        els.cdNum.textContent = '';
+        done && done();
+      }, 350);
+      return;
+    }
+    // 強制重啟 CSS 動畫：先移除 show class、強制 reflow、再加回去
+    els.cdNum.style.animation = 'none';
+    els.cdCap.style.animation = 'none';
+    void els.cdNum.offsetWidth;
+    els.cdNum.style.animation = '';
+    els.cdCap.style.animation = '';
+    els.cdNum.textContent = i;
+    els.cdCap.textContent = COUNTDOWN_CAPTIONS[i] || '';
+    i--;
+    _countdownTimer = setTimeout(step, 700);
+  };
+  step();
+}
+
+// ============ Fullscreen ============
+function fullscreen(){
+  if(!document.fullscreenElement){
+    if(document.documentElement.requestFullscreen){
+      document.documentElement.requestFullscreen().catch(() => toast('全螢幕請求被拒'));
+    }else{
+      // iOS Safari fallback：用 CSS 模擬全螢幕
+      document.body.classList.add('fullscreen');
+    }
+  }else{
+    document.exitFullscreen?.();
+    document.body.classList.remove('fullscreen');
+  }
+}
+// 雙向同步：使用者按 F11 進系統全螢幕也能切換 layout
+document.addEventListener('fullscreenchange', () => {
+  document.body.classList.toggle('fullscreen', !!document.fullscreenElement);
+  // 全螢幕進出時 layout 大改，必須 reanchor，否則 voice mode 會錯位
+  setTimeout(reanchor, 50);
+});
+
+// 視窗 resize / 字體載入完 / scrollInner 大小變動都重對齊
+const _resizeObserver = new ResizeObserver(() => {
+  if(state.charSpans.length > 0) reanchor();
+});
+window.addEventListener('load', () => {
+  if(els.scrollInner) _resizeObserver.observe(els.scrollInner);
+});
+window.addEventListener('resize', () => reanchor());
+
+// ============ Wiring ============
+// textarea input 用 debounce 重建 DOM，長腳本不卡
+let _renderTimer = null;
+els.script.addEventListener('input', () => {
+  save();   // save 自己會 debounce
+  clearTimeout(_renderTimer);
+  _renderTimer = setTimeout(() => renderText(), 150);
+});
+els.speed.addEventListener('input', e => setSpeed(e.target.value));
+els.speedNum.addEventListener('input', e => setSpeed(e.target.value));
+els.fontSize.addEventListener('input', e => setFontSize(e.target.value));
+els.fontSizeNum.addEventListener('input', e => setFontSize(e.target.value));
+els.lineHeight.addEventListener('input', e => setLineHeight(e.target.value));
+els.lineHeightNum.addEventListener('input', e => setLineHeight(e.target.value));
+els.fontColor.addEventListener('input', e => setFontColor(e.target.value));
+els.bgColor.addEventListener('input', e => setBgColor(e.target.value));
+els.mirrorH.addEventListener('click', () => toggleMirror('H'));
+els.mirrorV.addEventListener('click', () => toggleMirror('V'));
+els.playBtn.addEventListener('click', toggleAuto);
+els.resetBtn.addEventListener('click', reset);
+els.fsBtn.addEventListener('click', fullscreen);
+els.micBtn.addEventListener('click', toggleVoice);
+
+let _langSwitchTimer = null;
+els.lang.addEventListener('change', e => {
+  state.lang = e.target.value; save();
+  if(state.mode === 'voice'){
+    // 用單一 timer 避免快速連切時雙開 SR
+    clearTimeout(_langSwitchTimer);
+    stopVoice();
+    _langSwitchTimer = setTimeout(() => startVoice({silent:true}), 200);
+  }
+});
+
+els.importBtn.addEventListener('click', () => els.importFile.click());
+els.importFile.addEventListener('change', e => {
+  const f = e.target.files?.[0];
+  if(!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    if(typeof r.result !== 'string'){ toast('檔案讀取結果格式錯誤'); return; }
+    els.script.value = r.result;
+    renderText(); save(); reset();
+    toast('已匯入：' + f.name, 1600);
+  };
+  r.onerror = () => toast('檔案讀取失敗：' + (r.error?.message || '未知錯誤'));
+  r.readAsText(f, 'utf-8');
+  // 重置 input value 才能再次匯入同一個檔
+  els.importFile.value = '';
+});
+
+// Wheel：垂直鏡像時方向要反過來（不然使用者滾下感覺往上跑）
+els.stage.addEventListener('wheel', e => {
+  e.preventDefault();
+  const delta = state.mirrorV ? -e.deltaY : e.deltaY;
+  state.position = Math.max(0, Math.min(maxScroll(), state.position + delta));
+  state.targetPosition = state.position;
+  state.manualScrollLock = Date.now();
+  applyScroll();
+}, {passive:false});
+
+// Pointer drag：通吃 mouse + touch + pen，防止 dragY 卡死
+let dragY = null;
+function endDrag(){ dragY = null; els.stage.style.cursor = ''; }
+els.stage.addEventListener('pointerdown', e => {
+  // 只有點到 stage 自己或 scroll/scroll-inner 才開始拖（避免將來在 stage 內加按鈕時誤觸）
+  const t = e.target;
+  if(t !== els.stage && t !== els.scroll && t !== els.scrollInner && !t.classList?.contains('ch')) return;
+  dragY = {y:e.clientY, p:state.position};
+  els.stage.style.cursor = 'grabbing';
+  els.stage.setPointerCapture?.(e.pointerId);
+});
+window.addEventListener('pointermove', e => {
+  if(dragY === null) return;
+  const delta = state.mirrorV ? -(e.clientY - dragY.y) : (e.clientY - dragY.y);
+  state.position = Math.max(0, Math.min(maxScroll(), dragY.p - delta));
+  state.targetPosition = state.position;
+  state.manualScrollLock = Date.now();
+  applyScroll();
+});
+window.addEventListener('pointerup', endDrag);
+window.addEventListener('pointercancel', endDrag);
+window.addEventListener('blur', endDrag);  // Cmd+Tab 切走也要清
+
+// Keyboard：擋住 textarea/input/select 焦點，避免空白鍵把選單關掉去切自動播放
+window.addEventListener('keydown', e => {
+  const tag = document.activeElement?.tagName;
+  if(tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+  if(e.code === 'Space'){ e.preventDefault(); toggleAuto(); }
+  else if(e.key === 'v' || e.key === 'V'){ toggleVoice(); }
+  else if(e.key === 'ArrowUp'){ e.preventDefault(); setSpeed(state.speed + 2); }
+  else if(e.key === 'ArrowDown'){ e.preventDefault(); setSpeed(Math.max(1, state.speed - 2)); }
+  else if(e.key === 'r' || e.key === 'R'){ reset(); }
+  else if(e.key === 'f' || e.key === 'F'){ fullscreen(); }
+  else if(e.key === 'Escape'){ if(document.body.classList.contains('fullscreen')) fullscreen(); }
+});
+
+// ============ Init ============
+load();
+setFontSize(state.fontSize);
+setLineHeight(state.lineHeight);
+setFontColor(state.fontColor);
+setBgColor(state.bgColor);
+if(!els.script.value){
+  els.script.value =
+`大家好，這是一段示範稿件。
+
+提詞機支援兩種模式：自動播放與語音跟讀。
+按下「跟讀」按鈕，授權麥克風後就能開始唸。
+系統會即時辨識你正在唸的字，自動把那一句捲到視線指示線。
+
+唸快它就跟著快，唸慢它就停下來等你。
+標點符號、空白會被忽略，只比對實際的字。
+
+如果中間漏了一兩個字，演算法會用模糊比對找回位置；
+但如果你跳到下一段或重念一句，畫面有可能對不準，
+這時候按 R 重置就好。
+
+請把瀏覽器靠近鏡頭，眼睛盯著虛線，準備好了就按下方麥克風。`;
+}
+renderText();
+applyScroll();
+
+if(!speechSupported()){
+  els.micBtn.disabled = true;
+  els.micBtn.title = '此瀏覽器不支援語音識別（請用 Chrome / Edge）';
+}else{
+  // iOS Safari 雖然有 webkitSpeechRecognition 但 continuous 模式行為破碎
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+  if(isIOS || (isSafari && !/Chromium|Edg/.test(navigator.userAgent))){
+    els.micBtn.title = 'Safari/iOS 對連續語音識別支援有限，建議用桌面 Chrome';
+  }
+}
+</script>
+</body>
+</html>
