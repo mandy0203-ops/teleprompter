@@ -440,6 +440,7 @@ const state = {
   manualScrollLock:0,           // 手動拖曳/滾輪後鎖定 voice 對齊的 timestamp
   lastAdvanceAt:0,              // 上次 charIdx 推進的時間
   stuckWarned:false,            // 卡住提示是否已顯示（避免重複跳）
+  micStream:null,               // 持有的 getUserMedia stream，避免 Safari 每次 SR 重啟都彈權限
 };
 
 const STORAGE = 'teleprompter:v2';
@@ -692,6 +693,7 @@ function setMode(m){
     try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
     state.recognition = null;
     state.recognitionToken++;
+    releaseMicStream();   // 切走 voice 模式 = 釋放麥克風（紅燈熄）
   }
   if(m === 'idle'){
     els.playBtn.textContent = '▶ 自動';
@@ -799,6 +801,36 @@ function resetCompletion(){
 function speechSupported(){
   return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
+
+// 預先取得麥克風 stream 並持有著——讓後續 SR 重啟（onend 自動續啟、語言切換）
+// 全部 piggy-back 在同一個權限 grant 上，避免 Safari 每次都重彈授權
+async function ensureMicStream(){
+  if(state.micStream && state.micStream.active && state.micStream.getAudioTracks().some(t => t.readyState === 'live')){
+    return true;
+  }
+  if(!navigator.mediaDevices?.getUserMedia){
+    return true;  // 老瀏覽器沒 API 也別擋，讓 SR 自己試
+  }
+  try{
+    state.micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    return true;
+  }catch(e){
+    if(e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError'){
+      toast('麥克風權限被拒絕');
+    }else if(e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError'){
+      toast('找不到麥克風裝置');
+    }else{
+      toast('無法取得麥克風：' + (e.message || e.name));
+    }
+    return false;
+  }
+}
+function releaseMicStream(){
+  if(state.micStream){
+    try{ state.micStream.getTracks().forEach(t => t.stop()); }catch(e){}
+    state.micStream = null;
+  }
+}
 function toast(msg, ms=2200){
   els.toast.textContent = msg;
   els.toast.classList.add('show');
@@ -806,7 +838,7 @@ function toast(msg, ms=2200){
   toast._t = setTimeout(()=> els.toast.classList.remove('show'), ms);
 }
 
-function startVoice(opts){
+async function startVoice(opts){
   opts = opts || {};
   if(!speechSupported()){
     toast('此瀏覽器不支援語音識別，請改用 Chrome / Edge');
@@ -821,6 +853,9 @@ function startVoice(opts){
     sessionStorage.setItem('teleprompter:file-warned', '1');
     toast('提示：file:// 模式下每次都要重新授權麥克風，建議用「啟動-Mac.command」開', 4000);
   }
+  // 預先取得麥克風 stream 並持有——後續 SR 重啟全部走同一個權限，不會再彈授權彈窗
+  const micOk = await ensureMicStream();
+  if(!micOk) return;
   // 若已有舊的 SR，先確實清掉（避免 lang 切換或快速重啟雙開）
   if(state.recognition){
     const oldRec = state.recognition;
@@ -962,6 +997,7 @@ function stopVoice(){
     state.recognition = null;
   }
   state.recognitionToken++;  // 讓任何延遲觸發的舊回呼都被過濾掉
+  releaseMicStream();        // 釋放麥克風 stream（瀏覽器分頁紅燈會熄）
   setMode('idle');
 }
 function toggleVoice(){
