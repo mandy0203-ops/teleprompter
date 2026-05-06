@@ -353,7 +353,7 @@ main{
   <div style="display:flex;gap:8px">
     <button id="importBtn" class="ghost" title="匯入 .txt">匯入</button>
     <input type="file" id="importFile" accept=".txt,.md" hidden>
-    <button id="resetBtn" class="ghost" title="R">重置</button>
+    <button id="resetBtn" class="ghost" title="R · 跟讀中按一次=重對齊到目前位置；Shift+R=回到開頭">重對齊</button>
     <button id="micBtn" class="mic" title="V" aria-label="切換語音跟讀">🎤 跟讀</button>
     <button id="playBtn" class="primary" title="空白鍵" aria-label="切換自動播放">▶ 自動</button>
     <button id="fsBtn" class="ghost" title="F">全螢幕</button>
@@ -376,7 +376,7 @@ main{
     <div class="stage-mic-pill" id="stageMicPill"><span class="live-dot"></span>跟讀中</div>
     <div class="completion-mark" id="completionMark">✓</div>
     <div class="countdown" id="countdown"><span class="cd-num"></span><span class="cd-cap"></span></div>
-    <div class="hint">空白＝自動播放　V＝語音跟讀　↑↓＝速度　R＝重置　F＝全螢幕</div>
+    <div class="hint">空白＝自動播放　V＝語音跟讀　↑↓＝速度　R＝重對齊　Shift+R＝回開頭　F＝全螢幕</div>
     <div class="recog-strip" id="recogStrip"></div>
     <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
     <div class="toast" id="toast"></div>
@@ -728,12 +728,44 @@ function setMode(m){
   }
 }
 
-function reset(){
-  // 停掉自動播放（會立刻往下衝），但保留麥克風授權
+// 找出目前視線指示線（畫面中央）位置對應的 char index
+// 用來做「軟重置」——對齊到使用者現在看到的字，而不是回開頭
+function findCharIdxNearViewportCenter(){
+  if(state.charSpans.length === 0) return 0;
+  const targetY = state.position + els.scroll.clientHeight / 2;
+  for(let i = 0; i < state.charSpans.length; i++){
+    const sp = state.charSpans[i];
+    const centerY = sp.offsetTop + sp.offsetHeight / 2;
+    if(centerY >= targetY){
+      if(i > 0){
+        const prevCenter = state.charSpans[i-1].offsetTop + state.charSpans[i-1].offsetHeight/2;
+        if(targetY - prevCenter < centerY - targetY) return i - 1;
+      }
+      return i;
+    }
+  }
+  return state.charSpans.length - 1;
+}
+
+function reset(opts){
+  opts = opts || {};
+  // 預設：voice 模式軟重置（對齊目前位置）／ idle 或 auto 模式硬重置（回開頭）
+  // opts.toStart=true 強制硬重置
+  const hardReset = opts.toStart || state.mode !== 'voice';
+
   if(state.mode === 'auto') setMode('idle');
-  state.position = 0;
-  state.targetPosition = 0;
-  state.charIdx = 0;
+
+  if(hardReset){
+    state.position = 0;
+    state.targetPosition = 0;
+    state.charIdx = 0;
+  }else{
+    // 軟重置：scroll 位置不動，charIdx 拉到畫面中央那個字
+    state.charIdx = findCharIdxNearViewportCenter();
+    state.targetPosition = state.position;
+  }
+
+  // 共同清理（辨識歷史、卡住提示、完成動畫）
   state.recognitionBaseFinal = '';
   state.recognitionLastFinalIndex = 0;
   state.manualScrollLock = 0;
@@ -741,11 +773,10 @@ function reset(){
   state.stuckWarned = false;
   els.recogStrip.textContent = '';
   resetCompletion();
-  updateHighlight();
+  fullPaintHighlight();
   applyScroll();
 
-  // 語音模式下：必須 abort + 重啟 SR，否則瀏覽器內部 ev.results 還累積著舊的 final，
-  // 下一次 onresult 會把已念過的歷史當新內容，charIdx 會直接被推到稿尾
+  // 語音模式：abort + 重啟 SR（清掉瀏覽器內部累積的舊 ev.results）
   if(state.mode === 'voice' && state.recognition){
     const oldRec = state.recognition;
     try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.abort(); }catch(e){}
@@ -753,7 +784,7 @@ function reset(){
     setTimeout(() => {
       if(state.mode === 'voice') startVoice({silent:true});
     }, 80);
-    toast('已回到開頭，可繼續念稿', 1400);
+    toast(hardReset ? '已回到開頭' : '已重新對齊到目前位置，繼續念', 1400);
   }
 }
 
@@ -1216,7 +1247,7 @@ window.addEventListener('keydown', e => {
   else if(e.key === 'v' || e.key === 'V'){ toggleVoice(); }
   else if(e.key === 'ArrowUp'){ e.preventDefault(); setSpeed(state.speed + 2); }
   else if(e.key === 'ArrowDown'){ e.preventDefault(); setSpeed(Math.max(1, state.speed - 2)); }
-  else if(e.key === 'r' || e.key === 'R'){ reset(); }
+  else if(e.key === 'r' || e.key === 'R'){ reset(e.shiftKey ? {toStart:true} : {}); }
   else if(e.key === 'f' || e.key === 'F'){ fullscreen(); }
   else if(e.key === 'Escape'){ if(document.body.classList.contains('fullscreen')) fullscreen(); }
 });
