@@ -456,9 +456,11 @@ const state = {
     langSwitch: null,
     resetRestart: null,
     onendRestart: null,
+    startRetry: null,
     toast: null,
   },
   _quotaWarned: false,
+  recentEnds: [],
 };
 
 // 統一清掉所有跨流程 timer（mode 切換或 dispose 時用）
@@ -656,7 +658,9 @@ function normChar(c){
 }
 
 function renderText(){
-  const txt = els.script.value || '（在左側輸入或匯入講稿…）';
+  const realScript = els.script.value;
+  const isPlaceholder = !realScript;
+  const txt = realScript || '（在左側輸入或匯入講稿…）';
   const frag = document.createDocumentFragment();
   state.charSpans = [];
   state.charNorms = [];
@@ -664,9 +668,11 @@ function renderText(){
     if(ch === '\n'){ frag.appendChild(document.createElement('br')); continue; }
     const span = document.createElement('span');
     span.className = 'ch';
+    if(isPlaceholder) span.classList.add('placeholder');
     span.textContent = ch;
     const n = normChar(ch);
-    if(n){
+    // placeholder 路徑下不入 charSpans/charNorms：保住 startVoice 第 987 行的 length===0 守門
+    if(n && !isPlaceholder){
       span.dataset.i = state.charSpans.length;
       state.charSpans.push(span);
       state.charNorms.push(n);
@@ -776,22 +782,29 @@ function ensureLoop(){
 
 // 統一清掉 SR 物件 + 相關 state + 排隊中的 SR timer
 function disposeRecognition(){
+  // 先廢 token：onend / onresult 已在 microtask queue 的也會被 token guard 擋
+  state.recognitionToken++;
   if(state.recognition){
     const oldRec = state.recognition;
     try{ oldRec.onend = null; oldRec.onresult = null; oldRec.onerror = null; oldRec.onstart = null; oldRec.abort(); }catch(e){}
     state.recognition = null;
   }
-  state.recognitionToken++;
+  // starting 與 token 同生命週期；避免 throw 路徑卡住「starting=true」鎖死按鈕
+  state.starting = false;
   state.recognitionBaseFinal = '';
   state.recognitionLastFinalIndex = 0;
   state.recognitionLastEndAt = 0;
   state.recognitionRestartCount = 0;
+  state.recentEnds = [];
   clearTimerRef('onendRestart');
   clearTimerRef('resetRestart');
+  clearTimerRef('startRetry');
   clearTimerRef('langSwitch');
 }
 
 function setMode(m){
+  // 進非 idle mode 前若還在倒數，統一取消 → 避免 mode='voice' && counting=true 共存
+  if(state.counting && m !== 'idle') cancelCountdown();
   state.mode = m;
   state.lastT = 0;
   // 切走 voice：完整清掉 SR + 釋放麥克風
@@ -852,7 +865,12 @@ function findCharIdxNearViewportCenter(){
 
 function reset(opts){
   opts = opts || {};
-  const hardReset = opts.toStart || state.mode !== 'voice';
+  // 啟動麥克風 await 期間擋 R：避免 V+R 競態雙開 SR / 對齊到舊 charNorms
+  if(state.starting){ toast('正在啟動麥克風，稍候再試', 1500); return; }
+  // 念完稿尾 charIdx===length 時，findCharIdxNearViewportCenter 只能回 length-1（無意義）
+  // 此時無條件 hardReset 回開頭，符合使用者「念完想重來」的直覺
+  const atEnd = state.charSpans.length > 0 && state.charIdx >= state.charSpans.length;
+  const hardReset = opts.toStart || state.mode !== 'voice' || atEnd;
 
   if(state.mode === 'auto') setMode('idle');
   if(state.counting) cancelCountdown();
@@ -889,6 +907,8 @@ function reset(opts){
 
 // ============ Auto play ============
 function toggleAuto(){
+  // 啟動麥克風 await 期間擋空白鍵：避免 mode='voice' && counting=true 共存
+  if(state.starting){ toast('正在啟動麥克風，稍候再試', 1500); return; }
   if(state.counting){ cancelCountdown(); return; }
   if(state.mode === 'auto') return setMode('idle');
   if(state.mode === 'voice') stopVoice();
@@ -998,12 +1018,20 @@ async function startVoice(opts){
   }
 
   state.starting = true;
-  const startGen = state.recognitionToken;
-  const micOk = await ensureMicStream();
-  state.starting = false;
+  // 啟動前就 ++token 鎖定本次 generation；任何中途讓 token 改變的事件（reset/stopVoice/lang change）
+  // 都會讓本流程在 await 後 token mismatch → 放棄。**不再在後段二次 ++**。
+  const myToken = ++state.recognitionToken;
+  let micOk;
+  try{
+    micOk = await ensureMicStream();
+  }finally{
+    // 用 try/finally 保險清 starting：即使 await 內部 throw（極不可能）也不會卡死按鈕
+    state.starting = false;
+  }
   if(!micOk) return;
-  // await 期間使用者可能按了停止 / 切了 mode，token 已 ++ → 放棄此次啟動
-  if(state.recognitionToken !== startGen && state.mode !== 'voice') return;
+  // 嚴格 OR：token 變了或被切走 mode 都放棄；mode 必須是 idle（即將進 voice）或 voice（lang 切換重啟）
+  if(myToken !== state.recognitionToken) return;
+  if(state.mode !== 'idle' && state.mode !== 'voice') return;
 
   // 若已有舊 SR（少數情況：lang 切換邊界），徹底清掉避免雙開
   if(state.recognition){
@@ -1019,7 +1047,7 @@ async function startVoice(opts){
   rec.interimResults = true;
   rec.maxAlternatives = 1;
 
-  const myToken = ++state.recognitionToken;
+  // 沿用上面已 ++ 過的 myToken，不再二次 ++
   state.recognitionBaseFinal = '';
   state.recognitionLastFinalIndex = 0;
   state.recognitionLastEndAt = 0;
@@ -1029,6 +1057,7 @@ async function startVoice(opts){
 
   rec.onresult = (ev) => {
     if(myToken !== state.recognitionToken) return;
+    if(state.mode !== 'voice') return;  // 深度防禦：mode 已被切走時 microtask 仍可能跑
     if(state.charNorms.length === 0) return;
 
     let interim = '';
@@ -1128,17 +1157,16 @@ async function startVoice(opts){
     if(myToken !== state.recognitionToken) return;
     if(state.mode !== 'voice') return;
 
-    // 限頻自動重啟（200ms 容錯）
+    // 10s 滑動窗：防止「每 250-500ms 穩定 onend」造成 mic indicator 持續閃爍 + 無上限 GC 壓力
+    // 舊版只看 200ms 容錯窗 → count 永遠歸零，無法 self-stop
     const now = Date.now();
-    if(now - state.recognitionLastEndAt < 200){
-      state.recognitionRestartCount++;
-      if(state.recognitionRestartCount >= 3){
-        toast('語音識別頻繁中斷，已停止', 3000);
-        stopVoice();
-        return;
-      }
-    }else{
-      state.recognitionRestartCount = 0;
+    state.recentEnds = (state.recentEnds || []).filter(t => now - t < 10000);
+    state.recentEnds.push(now);
+    if(state.recentEnds.length >= 8){
+      toast('語音識別頻繁中斷，已停止', 3000);
+      state.recentEnds = [];
+      stopVoice();
+      return;
     }
     state.recognitionLastEndAt = now;
 
@@ -1164,7 +1192,12 @@ async function startVoice(opts){
   }catch(e){
     if(e.name === 'InvalidStateError'){
       // 罕見：剛 abort 的 SR 內部還沒乾淨。等一下再重試
-      setTimeout(() => { if(state.mode === 'voice') startVoice({silent:true}); }, 300);
+      // 必須寫入 state.timers，讓 disposeRecognition 能清掉，避免穿透 stopVoice / mode 切換
+      clearTimerRef('startRetry');
+      state.timers.startRetry = setTimeout(() => {
+        state.timers.startRetry = null;
+        if(state.mode === 'voice') startVoice({silent:true});
+      }, 300);
     }else{
       toast('無法啟動麥克風：' + e.message);
     }
